@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """ExtendScreen System Tray Host Controller.
 
-Provides a system tray icon with an on/off toggle flyout box:
-- Left-click on the tray icon reveals a small flyout right above the system tray.
+Provides a persistent system tray icon with an on/off toggle window:
+- Left-click on the tray icon reveals the control window positioned above the system tray.
 - Large ON/OFF toggle switch to start or kill all services.
 - In OFF mode: kills all screen-host.py and ffmpeg processes, and reverts display to internal.
 - In ON mode: launches the ExtendScreen host service (USB Cable or Wi-Fi).
-- Right-click shows a context menu with quick toggle and exit.
+- Right-click shows a context menu with quick toggle (Turn ON / Turn OFF) and exit.
 """
 
 from __future__ import annotations
@@ -22,10 +22,13 @@ import time
 import tkinter as tk
 from typing import Optional
 
-from PIL import Image, ImageTk, ImageEnhance
+from PIL import Image, ImageTk, ImageDraw, ImageFilter
 import pystray
 
 # Ensure all threads bind to the interactive 'Default' desktop
+user32 = ctypes.windll.user32
+kernel32 = ctypes.windll.kernel32
+
 def ensure_default_desktop():
     try:
         hdesk = user32.OpenDesktopW("default", 0, False, 0x01FF)
@@ -53,12 +56,12 @@ except Exception:
 ROOT_DIR = pathlib.Path(__file__).resolve().parents[1]
 HOST_SCRIPT = ROOT_DIR / "host-tools" / "screen-host.py"
 ICON_PNG = ROOT_DIR / "screen" / "Resources" / "Icon.png"
+TRAY_OFF_PNG = ROOT_DIR / "host-tools" / "tray_off.png"
+TRAY_ON_PNG = ROOT_DIR / "host-tools" / "tray_on.png"
 LOG_FILE = ROOT_DIR / "host-tools" / "tray.log"
 
 SPI_GETWORKAREA = 0x0030
 CREATE_NO_WINDOW = 0x08000000
-
-user32 = ctypes.windll.user32
 
 
 class RECT(ctypes.Structure):
@@ -72,6 +75,99 @@ class RECT(ctypes.Structure):
 
 class POINT(ctypes.Structure):
     _fields_ = [("x", wintypes.LONG), ("y", wintypes.LONG)]
+
+
+# =====================================================================
+# Generate High-Contrast Transparent Tray Icons
+# =====================================================================
+
+def ensure_tray_icons():
+    """Generates bold, high-contrast, transparent tray icons."""
+    if TRAY_OFF_PNG.exists() and TRAY_ON_PNG.exists():
+        return
+
+    def _draw_icon(is_active=False, size=64):
+        scale = 4
+        w = size * scale
+        h = size * scale
+        glyph = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(glyph)
+
+        gw = 224
+        gh = 100
+        gx0 = (w - gw) // 2
+        gy0 = (h - gh) // 2
+
+        def pt(rx, ry):
+            return (gx0 + (rx / 68.0) * gw, gy0 + (ry / 28.0) * gh)
+
+        stroke = 16
+        half_s = stroke / 2.0
+        main_color = (14, 165, 233, 255) if is_active else (255, 255, 255, 255)
+
+        # Base
+        bx0, by0 = pt(0.0, 25.5)
+        bx1, by1 = pt(31.5, 27.5)
+        draw.rounded_rectangle([bx0, by0, bx1, by1], radius=(by1 - by0) / 2.0, fill=main_color)
+
+        # Left screen
+        lx0, ly0 = pt(2.0, 5.5)
+        lx1, ly1 = pt(30.0, 22.5)
+        lr = 18
+        draw.rounded_rectangle([lx0, ly0, lx1, ly1], radius=lr, outline=main_color, width=stroke)
+
+        cx_l, cy_l = pt(30.0, 22.5)
+        rad_l = (12.5 / 68.0) * gw
+        arc_box_l = [cx_l - rad_l, cy_l - rad_l, cx_l + rad_l, cy_l + rad_l]
+        mask_l = Image.new("L", (w, h), 0)
+        draw_ml = ImageDraw.Draw(mask_l)
+        draw_ml.rounded_rectangle([lx0 + half_s, ly0 + half_s, lx1 - half_s, ly1 - half_s], radius=max(1, lr - half_s), fill=255)
+
+        arc_layer_l = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        draw_al = ImageDraw.Draw(arc_layer_l)
+        draw_al.arc(arc_box_l, start=180, end=270, fill=main_color, width=stroke)
+        glyph.paste(arc_layer_l, (0, 0), mask_l)
+
+        # Right screen
+        rx0, ry0 = pt(36.0, 0.5)
+        rx1, ry1 = pt(68.0, 22.5)
+        rr = 20
+        draw.rounded_rectangle([rx0, ry0, rx1, ry1], radius=rr, outline=main_color, width=stroke)
+
+        cx_r, cy_r = pt(36.0, 22.5)
+        rad_r = (16.0 / 68.0) * gw
+        arc_box_r = [cx_r - rad_r, cy_r - rad_r, cx_r + rad_r, cy_r + rad_r]
+        mask_r = Image.new("L", (w, h), 0)
+        draw_mr = ImageDraw.Draw(mask_r)
+        draw_mr.rounded_rectangle([rx0 + half_s, ry0 + half_s, rx1 - half_s, ry1 - half_s], radius=max(1, rr - half_s), fill=255)
+
+        arc_layer_r = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        draw_ar = ImageDraw.Draw(arc_layer_r)
+        draw_ar.arc(arc_box_r, start=270, end=360, fill=main_color, width=stroke)
+        glyph.paste(arc_layer_r, (0, 0), mask_r)
+
+        if is_active:
+            dot_r = 18
+            dot_x = rx1 + 10
+            dot_y = ry0 - 10
+            draw.ellipse([dot_x - dot_r, dot_y - dot_r, dot_x + dot_r, dot_y + dot_r], fill=(34, 197, 94, 255), outline=(255, 255, 255, 255), width=4)
+
+        # Subtle dark halo for maximum visibility against light backgrounds
+        shadow = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        alpha = glyph.split()[3]
+        shadow_mask = alpha.filter(ImageFilter.GaussianBlur(radius=3))
+        shadow_draw = ImageDraw.Draw(shadow)
+        shadow_draw.rectangle([0, 0, w, h], fill=(0, 0, 0, 160))
+
+        final_img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        final_img.paste(shadow, (0, 0), shadow_mask)
+        final_img.paste(glyph, (0, 0), glyph)
+        return final_img.resize((size, size), Image.Resampling.LANCZOS)
+
+    ico_off = _draw_icon(is_active=False)
+    ico_on = _draw_icon(is_active=True)
+    ico_off.save(TRAY_OFF_PNG)
+    ico_on.save(TRAY_ON_PNG)
 
 
 # =====================================================================
@@ -99,7 +195,7 @@ class ExtendServiceManager:
         self.stop_requested = False
         self.mode = mode
 
-        # First ensure no previous stale instances exist
+        # Kill any prior orphan processes before starting
         self.kill_all(reset_display=False)
 
         cmd = [sys.executable, str(HOST_SCRIPT)]
@@ -110,7 +206,7 @@ class ExtendServiceManager:
 
         try:
             with open(LOG_FILE, "a", encoding="utf-8") as log_out:
-                log_out.write(f"\n--- ExtendScreen Service Started ({mode}) at {time.ctime()} ---\n")
+                log_out.write(f"\n--- ExtendScreen Started ({mode}) at {time.ctime()} ---\n")
                 log_out.flush()
 
             self.proc = subprocess.Popen(
@@ -282,9 +378,9 @@ class SmoothToggle(tk.Canvas):
         t = (self.current_x - pad) / max(1.0, (self.width - kd - pad * 2))
         t = max(0.0, min(1.0, t))
 
-        r_c = int(59 * (1 - t) + 0 * t)
-        g_c = int(59 * (1 - t) + 120 * t)
-        b_c = int(68 * (1 - t) + 212 * t)
+        r_c = int(59 * (1 - t) + 14 * t)
+        g_c = int(59 * (1 - t) + 165 * t)
+        b_c = int(68 * (1 - t) + 233 * t)
         track_color = f"#{r_c:02x}{g_c:02x}{b_c:02x}"
 
         self.create_oval(0, 0, self.height, self.height, fill=track_color, outline="")
@@ -296,36 +392,32 @@ class SmoothToggle(tk.Canvas):
 
 
 # =====================================================================
-# Flyout Window (Small box appearing above the system tray)
+# Control Window (Positioned nicely above the system tray)
 # =====================================================================
 
-class TrayFlyout(tk.Toplevel):
-    """Modern dark flyout box positioned directly above the system tray."""
+class ControlWindow(tk.Toplevel):
+    """Modern dark control card window."""
 
     def __init__(self, master, manager: ExtendServiceManager, on_exit=None):
         super().__init__(master)
         self.manager = manager
         self.on_exit = on_exit
 
-        self.overrideredirect(True)
-        self.attributes("-topmost", True)
-        self.configure(bg="#1A1A22")
-        self.withdraw()
+        self.title("ExtendScreen Controls")
+        self.configure(bg="#181820")
+        self.resizable(False, False)
+        self.width = 340
+        self.height = 320
 
-        self.width = 330
-        self.height = 310
+        # Close button hides to tray instead of quitting
+        self.protocol("WM_DELETE_WINDOW", self.hide)
+        self.withdraw()
 
         self.icon_photo: Optional[ImageTk.PhotoImage] = None
         self._init_ui()
 
-        self.bind("<Escape>", lambda e: self.hide())
-        self.poll_active = False
-
     def _init_ui(self):
-        outer = tk.Frame(self, bg="#33333E", padx=1, pady=1)
-        outer.pack(fill="both", expand=True)
-
-        inner = tk.Frame(outer, bg="#181820", padx=16, pady=14)
+        inner = tk.Frame(self, bg="#181820", padx=16, pady=14)
         inner.pack(fill="both", expand=True)
 
         # Header
@@ -334,7 +426,7 @@ class TrayFlyout(tk.Toplevel):
 
         if ICON_PNG.exists():
             try:
-                im = Image.open(ICON_PNG).resize((22, 22), Image.Resampling.LANCZOS)
+                im = Image.open(ICON_PNG).resize((24, 24), Image.Resampling.LANCZOS)
                 self.icon_photo = ImageTk.PhotoImage(im)
                 lbl_icon = tk.Label(header, image=self.icon_photo, bg="#181820")
                 lbl_icon.pack(side="left", padx=(0, 8))
@@ -344,13 +436,13 @@ class TrayFlyout(tk.Toplevel):
         lbl_title = tk.Label(
             header,
             text="ExtendScreen",
-            font=("Segoe UI", 11, "bold"),
+            font=("Segoe UI", 12, "bold"),
             fg="#FFFFFF",
             bg="#181820",
         )
         lbl_title.pack(side="left")
 
-        btn_close = tk.Label(
+        btn_min = tk.Label(
             header,
             text="✕",
             font=("Segoe UI", 10),
@@ -358,10 +450,10 @@ class TrayFlyout(tk.Toplevel):
             bg="#181820",
             cursor="hand2",
         )
-        btn_close.pack(side="right")
-        btn_close.bind("<Button-1>", lambda e: self.hide())
-        btn_close.bind("<Enter>", lambda e: btn_close.configure(fg="#FFFFFF"))
-        btn_close.bind("<Leave>", lambda e: btn_close.configure(fg="#9CA3AF"))
+        btn_min.pack(side="right")
+        btn_min.bind("<Button-1>", lambda e: self.hide())
+        btn_min.bind("<Enter>", lambda e: btn_min.configure(fg="#FFFFFF"))
+        btn_min.bind("<Leave>", lambda e: btn_min.configure(fg="#9CA3AF"))
 
         # Main Toggle Card
         self.card = tk.Frame(inner, bg="#22222C", padx=14, pady=12, highlightthickness=1, highlightbackground="#363644")
@@ -373,7 +465,7 @@ class TrayFlyout(tk.Toplevel):
         lbl_serv = tk.Label(card_left, text="Screen Sharing", font=("Segoe UI", 9), fg="#9CA3AF", bg="#22222C")
         lbl_serv.pack(anchor="w")
 
-        self.lbl_status = tk.Label(card_left, text="OFF", font=("Segoe UI", 14, "bold"), fg="#9CA3AF", bg="#22222C")
+        self.lbl_status = tk.Label(card_left, text="OFF", font=("Segoe UI", 15, "bold"), fg="#9CA3AF", bg="#22222C")
         self.lbl_status.pack(anchor="w", pady=(2, 0))
 
         self.lbl_substatus = tk.Label(
@@ -440,25 +532,25 @@ class TrayFlyout(tk.Toplevel):
         footer = tk.Frame(inner, bg="#181820")
         footer.pack(fill="x", side="bottom")
 
-        self.startup_var = tk.BooleanVar(value=self._is_startup_enabled())
-        cb_startup = tk.Checkbutton(
+        btn_hide = tk.Button(
             footer,
-            text="Start with Windows",
-            variable=self.startup_var,
+            text="Hide to Tray",
             font=("Segoe UI", 8),
-            fg="#9CA3AF",
-            bg="#181820",
-            selectcolor="#181820",
-            activebackground="#181820",
+            fg="#E5E7EB",
+            bg="#2A2A36",
+            activebackground="#3A3A4A",
             activeforeground="#FFFFFF",
-            command=self._on_toggle_startup,
+            relief="flat",
+            command=self.hide,
             cursor="hand2",
+            padx=8,
+            pady=2,
         )
-        cb_startup.pack(side="left")
+        btn_hide.pack(side="left")
 
         btn_exit = tk.Label(
             footer,
-            text="Exit Tray",
+            text="Exit App",
             font=("Segoe UI", 8, "underline"),
             fg="#9CA3AF",
             bg="#181820",
@@ -497,78 +589,24 @@ class TrayFlyout(tk.Toplevel):
             self.lbl_substatus.configure(text="All processes stopped", fg="#6B7280")
             self.card.configure(highlightbackground="#363644")
 
-    def show_above_tray(self):
-        pt = POINT()
-        user32.GetCursorPos(ctypes.byref(pt))
-
+    def show_window(self):
         wa = RECT()
         user32.SystemParametersInfoW(SPI_GETWORKAREA, 0, ctypes.byref(wa), 0)
 
-        x = min(wa.right - self.width - 12, max(wa.left + 12, pt.x - self.width // 2))
-        y = wa.bottom - self.height - 8
-        if pt.y < (wa.top + wa.bottom) // 2:
-            y = wa.top + 8
+        # Bottom right placement
+        x = wa.right - self.width - 16
+        y = wa.bottom - self.height - 16
 
         self.geometry(f"{self.width}x{self.height}+{x}+{y}")
+        self.update_state(self.manager.is_running())
         self.deiconify()
         self.lift()
         self.attributes("-topmost", True)
+        self.after(300, lambda: self.attributes("-topmost", False))
         self.focus_force()
 
-        self.poll_active = True
-        self._poll_click_outside()
-
     def hide(self):
-        self.poll_active = False
         self.withdraw()
-
-    def toggle_visibility(self):
-        if self.winfo_viewable():
-            self.hide()
-        else:
-            self.update_state(self.manager.is_running())
-            self.show_above_tray()
-
-    def _poll_click_outside(self):
-        if not self.poll_active or not self.winfo_viewable():
-            return
-
-        if user32.GetAsyncKeyState(0x01) & 0x8000:
-            pt = POINT()
-            user32.GetCursorPos(ctypes.byref(pt))
-            wx = self.winfo_x()
-            wy = self.winfo_y()
-            ww = self.winfo_width()
-            wh = self.winfo_height()
-
-            if not (wx <= pt.x <= wx + ww and wy <= pt.y <= wy + wh):
-                self.hide()
-                return
-
-        self.after(80, self._poll_click_outside)
-
-    def _is_startup_enabled(self) -> bool:
-        startup_dir = os.path.join(os.environ.get("APPDATA", ""), r"Microsoft\Windows\Start Menu\Programs\Startup")
-        cmd_file = os.path.join(startup_dir, "ExtendScreenTray.cmd")
-        return os.path.exists(cmd_file)
-
-    def _on_toggle_startup(self):
-        startup_dir = os.path.join(os.environ.get("APPDATA", ""), r"Microsoft\Windows\Start Menu\Programs\Startup")
-        cmd_file = os.path.join(startup_dir, "ExtendScreenTray.cmd")
-        start_script = ROOT_DIR / "start-tray.cmd"
-
-        if self.startup_var.get():
-            try:
-                with open(cmd_file, "w", encoding="utf-8") as f:
-                    f.write(f'@echo off\r\nstart "" "{start_script}"\r\n')
-            except Exception as e:
-                print(f"Error creating startup file: {e}", file=sys.stderr)
-        else:
-            if os.path.exists(cmd_file):
-                try:
-                    os.remove(cmd_file)
-                except Exception as e:
-                    print(f"Error removing startup file: {e}", file=sys.stderr)
 
     def _exit_app(self):
         self.hide()
@@ -582,26 +620,27 @@ class TrayFlyout(tk.Toplevel):
 
 class ExtendScreenTrayApp:
     def __init__(self):
-        # Prevent duplicate instances
-        hwnd_existing = user32.FindWindowW(None, "ExtendScreenTrayHiddenHost")
+        ensure_tray_icons()
+
+        # Check existing instance
+        hwnd_existing = user32.FindWindowW(None, "ExtendScreen_MasterRoot")
         if hwnd_existing:
             sys.exit(0)
 
         self.root = tk.Tk()
-        self.root.title("ExtendScreenTrayHiddenHost")
+        self.root.title("ExtendScreen_MasterRoot")
         self.root.withdraw()
 
-        self.img_on = Image.open(ICON_PNG).resize((64, 64), Image.Resampling.LANCZOS)
-        enh = ImageEnhance.Brightness(self.img_on.convert("L").convert("RGBA"))
-        self.img_off = enh.enhance(0.55)
+        self.img_off = Image.open(TRAY_OFF_PNG)
+        self.img_on = Image.open(TRAY_ON_PNG)
 
         self.manager = ExtendServiceManager(on_status_change=self._on_service_status_change)
-        self.flyout = TrayFlyout(self.root, self.manager, on_exit=self.quit_app)
+        self.control_win = ControlWindow(self.root, self.manager, on_exit=self.quit_app)
 
         # Setup Pystray Tray Icon
         menu = pystray.Menu(
-            pystray.MenuItem("Open Controls", self._tray_left_click, default=True),
-            pystray.MenuItem(lambda text: "Turn OFF (Kill All)" if self.manager.is_running() else "Turn ON", self._tray_toggle_service),
+            pystray.MenuItem("Open ExtendScreen", self._on_tray_click, default=True),
+            pystray.MenuItem(lambda text: "Turn OFF (Kill All)" if self.manager.is_running() else "Turn ON (USB Cable)", self._tray_toggle_service),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Exit", lambda: self.root.after(0, self.quit_app)),
         )
@@ -614,27 +653,27 @@ class ExtendScreenTrayApp:
         )
         self.tray.run_detached()
 
-    def _tray_left_click(self, icon=None, item=None):
-        self.root.after(0, self.flyout.toggle_visibility)
+    def _on_tray_click(self, icon=None, item=None):
+        self.root.after(0, self.control_win.show_window)
 
     def _tray_toggle_service(self, icon=None, item=None):
         def _toggle():
             if self.manager.is_running():
                 self.manager.kill_all(reset_display=True)
             else:
-                self.manager.start(self.flyout.mode_var.get())
-            self.flyout.update_state(self.manager.is_running())
+                self.manager.start(self.control_win.mode_var.get())
+            self.control_win.update_state(self.manager.is_running())
             self._update_tray_state(self.manager.is_running())
         self.root.after(0, _toggle)
 
     def _on_service_status_change(self, is_running: bool):
         def _update():
             self._update_tray_state(is_running)
-            self.flyout.update_state(is_running)
+            self.control_win.update_state(is_running)
         self.root.after(0, _update)
 
     def _update_tray_state(self, is_running: bool):
-        mode_name = "USB Cable" if self.flyout.mode_var.get() == "cable" else "Wi-Fi"
+        mode_name = "USB Cable" if self.control_win.mode_var.get() == "cable" else "Wi-Fi"
         self.tray.icon = self.img_on if is_running else self.img_off
         self.tray.title = f"ExtendScreen: {'ON (' + mode_name + ')' if is_running else 'OFF'}"
         try:
