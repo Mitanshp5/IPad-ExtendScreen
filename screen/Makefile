@@ -22,7 +22,7 @@ include $(THEOS_MAKE_PATH)/application.mk
 
 Package: local.extendscreen
 Name: Extend Screen
-Version: 1.0.5
+Version: 1.0.8
 Architecture: iphoneos-arm
 Description: Extend your PC screen to an iPad mini (iOS 9.3.5) over Wi-Fi or USB cable.
 Maintainer: Mitansh

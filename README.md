@@ -55,7 +55,7 @@ wsl -d Ubuntu -e bash -c "chmod 755 /home/mitansh/.cache/extendscreen-build/scre
 wsl -d Ubuntu -e bash -c "source /home/mitansh/.cache/hermespad-build/env.sh && cd /home/mitansh/.cache/extendscreen-build/screen && make clean && make package DEBUG=0 STRIP=0"
 
 # 4. Copy the generated .deb to your Windows repository
-wsl -d Ubuntu -e bash -c "cp /home/mitansh/.cache/extendscreen-build/screen/packages/*.deb /mnt/c/Code/ExtendScreen/ExtendScreen-1.0.7.deb"
+wsl -d Ubuntu -e bash -c "cp /home/mitansh/.cache/extendscreen-build/screen/packages/*.deb /mnt/c/Code/ExtendScreen/ExtendScreen-1.0.8.deb"
 ```
 
 ---
@@ -70,12 +70,12 @@ wsl -d Ubuntu -e bash -c "cp /home/mitansh/.cache/extendscreen-build/screen/pack
 ### 2. Upload the Package via cURL
 Run from your PC:
 ```powershell
-curl.exe -s -m 120 -F "file=@C:\Code\ExtendScreen\ExtendScreen-1.0.7.deb" http://<iPad-IP>:10000/upload
+curl.exe -s -m 120 -F "file=@C:\Code\ExtendScreen\ExtendScreen-1.0.8.deb" http://<iPad-IP>:10000/upload
 ```
 
 ### 3. Install on Device
 1. Tap **Done** on the iPad to exit the iFile web server view.
-2. Locate `ExtendScreen-1.0.7.deb` in the current folder.
+2. Locate `ExtendScreen-1.0.8.deb` in the current folder.
 3. Tap the file and select **Installer**.
 4. Confirm it finishes with **`Result Code: 0`**.
 5. Respring or restart if requested, then find **Extend Screen** on your Home Screen.
