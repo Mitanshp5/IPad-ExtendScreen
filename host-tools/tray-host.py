@@ -180,6 +180,7 @@ class ExtendServiceManager:
     def __init__(self, on_status_change=None) -> None:
         self.proc: Optional[subprocess.Popen] = None
         self.mode = "cable"  # "cable" or "wifi"
+        self.fps = 45
         self.on_status_change = on_status_change
         self.monitor_thread: Optional[threading.Thread] = None
         self.stop_requested = False
@@ -191,22 +192,23 @@ class ExtendServiceManager:
             self.proc = None
         return False
 
-    def start(self, mode: str = "cable") -> bool:
+    def start(self, mode: str = "cable", fps: int = 45) -> bool:
         self.stop_requested = False
         self.mode = mode
+        self.fps = fps
 
         # Kill any prior orphan processes before starting
         self.kill_all(reset_display=False)
 
         cmd = [sys.executable, str(HOST_SCRIPT)]
         if mode == "cable":
-            cmd.extend(["--cable", "--extend", "--fps", "45"])
+            cmd.extend(["--cable", "--extend", "--fps", str(fps)])
         else:
-            cmd.extend(["--extend"])
+            cmd.extend(["--extend", "--fps", str(fps)])
 
         try:
             with open(LOG_FILE, "a", encoding="utf-8") as log_out:
-                log_out.write(f"\n--- ExtendScreen Started ({mode}) at {time.ctime()} ---\n")
+                log_out.write(f"\n--- ExtendScreen Started ({mode} @ {fps} fps) at {time.ctime()} ---\n")
                 log_out.flush()
 
             self.proc = subprocess.Popen(
@@ -264,7 +266,17 @@ class ExtendServiceManager:
                 pass
             self.proc = None
 
-        # 2. Terminate any other screen-host.py python processes
+        # 2. Fast kill any orphaned ffmpeg capture processes
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/IM", "ffmpeg.exe"],
+                capture_output=True,
+                creationflags=CREATE_NO_WINDOW,
+            )
+        except Exception:
+            pass
+
+        # 3. Terminate any other screen-host.py python processes
         try:
             ps_cmd = (
                 'Get-CimInstance Win32_Process | '
@@ -347,7 +359,8 @@ class SmoothToggle(tk.Canvas):
         self.target_x = (self.width - kd - pad) if self.is_on else pad
         self._animate()
         if trigger_command and self.command:
-            self.command(self.is_on)
+            # Defer callback so toggle animation starts immediately without delay
+            self.after(0, lambda: self.command(self.is_on))
 
     def on_click(self, event=None):
         new_state = not self.is_on
@@ -417,10 +430,13 @@ class ControlWindow(tk.Toplevel):
         self.configure(bg="#121218")
         self.resizable(False, False)
         self.width = 370
-        self.height = 425
+        self.height = 465
         self.opened_at = 0.0
         self._drag_x = 0
         self._drag_y = 0
+
+        self.fps_var = tk.StringVar(value="45")
+        self.fps_buttons = {}
 
         self.withdraw()
 
@@ -534,17 +550,17 @@ class ControlWindow(tk.Toplevel):
             fg="#9CA3AF",
             bg="#181822",
             padx=12,
-            pady=10,
+            pady=8,
             highlightthickness=1,
             highlightbackground="#2C2C3C",
         )
-        mode_box.pack(fill="x", pady=(0, 12))
+        mode_box.pack(fill="x", pady=(0, 10))
 
         self.mode_var = tk.StringVar(value="cable")
 
         rb_cable = tk.Radiobutton(
             mode_box,
-            text="⚡ USB Cable (Recommended, 45 fps)",
+            text="⚡ USB Cable (Recommended)",
             variable=self.mode_var,
             value="cable",
             font=("Segoe UI", 9),
@@ -581,7 +597,7 @@ class ControlWindow(tk.Toplevel):
             command=self._on_mode_change,
             cursor="hand2",
         )
-        rb_wifi.pack(anchor="w", pady=(6, 0))
+        rb_wifi.pack(anchor="w", pady=(4, 0))
 
         lbl_wifi_tip = tk.Label(
             mode_box,
@@ -591,6 +607,45 @@ class ControlWindow(tk.Toplevel):
             bg="#181822",
         )
         lbl_wifi_tip.pack(anchor="w")
+
+        # Framerate (FPS) Control Row
+        fps_box = tk.Frame(inner, bg="#1F1F2C", padx=12, pady=8, highlightthickness=1, highlightbackground="#2C2C3C")
+        fps_box.pack(fill="x", pady=(0, 12))
+
+        lbl_fps = tk.Label(fps_box, text="Framerate:", font=("Segoe UI", 8, "bold"), fg="#D1D5DB", bg="#1F1F2C")
+        lbl_fps.pack(side="left", padx=(0, 8))
+
+        self.fps_btn_container = tk.Frame(fps_box, bg="#282838", padx=2, pady=2, highlightthickness=1, highlightbackground="#3A3A4A")
+        self.fps_btn_container.pack(side="left")
+
+        self.fps_buttons = {}
+        for val in ["30", "45", "60"]:
+            b = tk.Label(self.fps_btn_container, text=f"{val}", font=("Segoe UI", 8, "bold"), width=3, padx=4, pady=2, cursor="hand2")
+            b.pack(side="left", padx=1)
+            b.bind("<Button-1>", lambda e, v=val: self._select_fps(v))
+            self.fps_buttons[val] = b
+
+        self.entry_fps = tk.Entry(
+            fps_box,
+            textvariable=self.fps_var,
+            font=("Segoe UI", 8, "bold"),
+            width=3,
+            bg="#282838",
+            fg="#38BDF8",
+            justify="center",
+            bd=0,
+            highlightthickness=1,
+            highlightbackground="#3A3A4A",
+            insertbackground="#38BDF8",
+        )
+        self.entry_fps.pack(side="left", padx=(8, 0))
+        self.entry_fps.bind("<Return>", lambda e: self._on_custom_fps())
+        self.entry_fps.bind("<FocusOut>", lambda e: self._on_custom_fps())
+
+        lbl_fps_unit = tk.Label(fps_box, text="FPS (5-60)", font=("Segoe UI", 7), fg="#6B7280", bg="#1F1F2C")
+        lbl_fps_unit.pack(side="left", padx=(4, 0))
+
+        self._update_fps_buttons()
 
         # Status / Guidance Box
         info_box = tk.Frame(inner, bg="#1F1F2C", padx=10, pady=8, highlightthickness=1, highlightbackground="#2A2A38")
@@ -646,7 +701,7 @@ class ControlWindow(tk.Toplevel):
 
         self.update_idletasks()
         self.width = max(370, self.winfo_reqwidth())
-        self.height = max(420, self.winfo_reqheight())
+        self.height = max(465, self.winfo_reqheight())
 
     def _start_drag(self, event):
         self._drag_x = event.x
@@ -657,28 +712,119 @@ class ControlWindow(tk.Toplevel):
         y = self.winfo_y() + (event.y - self._drag_y)
         self.geometry(f"+{x}+{y}")
 
+    def get_fps(self) -> int:
+        try:
+            val = int(self.fps_var.get().strip())
+            return max(5, min(60, val))
+        except Exception:
+            return 45
+
+    def _select_fps(self, val: str):
+        self.fps_var.set(val)
+        self._update_fps_buttons()
+        if self.manager.is_running():
+            self._on_fps_changed()
+
+    def _on_custom_fps(self):
+        val = self.get_fps()
+        self.fps_var.set(str(val))
+        self._update_fps_buttons()
+        if self.manager.is_running():
+            self._on_fps_changed()
+
+    def _update_fps_buttons(self):
+        cur = self.fps_var.get().strip()
+        for val, btn in self.fps_buttons.items():
+            if cur == val:
+                btn.configure(bg="#0284C7", fg="#FFFFFF")
+            else:
+                btn.configure(bg="#282838", fg="#9CA3AF")
+
+    def _on_fps_changed(self):
+        mode = self.mode_var.get()
+        fps = self.get_fps()
+        mode_name = "USB Cable" if mode == "cable" else "Wi-Fi"
+        self.lbl_status.configure(text="UPDATING...", fg="#38BDF8")
+        self.lbl_substatus.configure(text=f"Applying {fps} FPS to {mode_name}...", fg="#38BDF8")
+
+        def _bg():
+            self.manager.start(mode, fps=fps)
+            self.after(0, lambda: self._on_start_finished(True))
+
+        threading.Thread(target=_bg, daemon=True).start()
+
     def _on_toggle(self, is_on: bool):
+        mode = self.mode_var.get()
+        fps = self.get_fps()
+        mode_name = "USB Cable" if mode == "cable" else "Wi-Fi"
+
+        # 1. Update UI IMMEDIATELY so toggle knob and labels never lag
         if is_on:
-            mode = self.mode_var.get()
-            success = self.manager.start(mode)
-            if not success:
-                self.toggle.set_state(False)
+            self.lbl_status.configure(text="STARTING...", fg="#38BDF8")
+            self.lbl_substatus.configure(text=f"Launching {mode_name} ({fps} FPS)...", fg="#38BDF8")
+            self.card.configure(highlightbackground="#0284C7", bg="#1A2234")
+            self.card_left.configure(bg="#1A2234")
+            self.lbl_serv.configure(bg="#1A2234")
+            self.lbl_status.configure(bg="#1A2234")
+            self.lbl_substatus.configure(bg="#1A2234")
+            self.toggle.configure(bg="#1A2234")
         else:
-            self.manager.kill_all(reset_display=True)
-        self.update_state(self.manager.is_running())
+            self.lbl_status.configure(text="STOPPING...", fg="#9CA3AF")
+            self.lbl_substatus.configure(text="Stopping all services...", fg="#6B7280")
+            self.card.configure(highlightbackground="#363648", bg="#22222E")
+            self.card_left.configure(bg="#22222E")
+            self.lbl_serv.configure(bg="#22222E")
+            self.lbl_status.configure(bg="#22222E")
+            self.lbl_substatus.configure(bg="#22222E")
+            self.toggle.configure(bg="#22222E")
+
+        # 2. Heavy process operations run asynchronously in background thread
+        def _bg_action():
+            if is_on:
+                success = self.manager.start(mode, fps=fps)
+                self.after(0, lambda: self._on_start_finished(success))
+            else:
+                self.manager.kill_all(reset_display=True)
+                self.after(0, lambda: self._on_kill_finished())
+
+        threading.Thread(target=_bg_action, daemon=True).start()
+
+    def _on_start_finished(self, success: bool):
+        if success:
+            mode_name = "USB Cable" if self.mode_var.get() == "cable" else "Wi-Fi"
+            fps = self.get_fps()
+            self.lbl_status.configure(text="ON", fg="#38BDF8")
+            self.lbl_substatus.configure(text=f"Active ({mode_name}) • {fps} FPS • Display extended", fg="#38BDF8")
+            self.card.configure(highlightbackground="#0284C7", bg="#1A2234")
+        else:
+            self.toggle.set_state(False)
+            self.update_state(False)
+            self.lbl_substatus.configure(text="Failed to start host service", fg="#EF4444")
+
+    def _on_kill_finished(self):
+        self.update_state(False)
 
     def _on_mode_change(self):
         if self.manager.is_running():
             mode = self.mode_var.get()
-            self.manager.start(mode)
-            self.update_state(True)
+            fps = self.get_fps()
+            mode_name = "USB Cable" if mode == "cable" else "Wi-Fi"
+            self.lbl_status.configure(text="SWITCHING...", fg="#38BDF8")
+            self.lbl_substatus.configure(text=f"Switching to {mode_name} ({fps} FPS)...", fg="#38BDF8")
+
+            def _bg_restart():
+                self.manager.start(mode, fps=fps)
+                self.after(0, lambda: self._on_start_finished(True))
+
+            threading.Thread(target=_bg_restart, daemon=True).start()
 
     def update_state(self, is_running: bool):
         self.toggle.set_state(is_running)
+        fps = self.get_fps()
         if is_running:
             mode_name = "USB Cable" if self.mode_var.get() == "cable" else "Wi-Fi"
             self.lbl_status.configure(text="ON", fg="#38BDF8")
-            self.lbl_substatus.configure(text=f"Active ({mode_name}) • Display extended", fg="#38BDF8")
+            self.lbl_substatus.configure(text=f"Active ({mode_name}) • {fps} FPS • Display extended", fg="#38BDF8")
             self.card.configure(highlightbackground="#0284C7", bg="#1A2234")
             self.card_left.configure(bg="#1A2234")
             self.lbl_serv.configure(bg="#1A2234")
@@ -710,7 +856,7 @@ class ControlWindow(tk.Toplevel):
         # Recalculate dimensions dynamically
         self.update_idletasks()
         self.width = max(370, self.winfo_reqwidth())
-        self.height = max(420, self.winfo_reqheight())
+        self.height = max(465, self.winfo_reqheight())
 
         # Horizontal positioning:
         # If clicked in tray area (right side of monitor), center relative to click
@@ -835,11 +981,9 @@ class ExtendScreenTrayApp:
     def _tray_toggle_service(self, icon=None, item=None):
         def _toggle():
             if self.manager.is_running():
-                self.manager.kill_all(reset_display=True)
+                self.control_win.toggle.set_state(False, trigger_command=True)
             else:
-                self.manager.start(self.control_win.mode_var.get())
-            self.control_win.update_state(self.manager.is_running())
-            self._update_tray_state(self.manager.is_running())
+                self.control_win.toggle.set_state(True, trigger_command=True)
         self.root.after(0, _toggle)
 
     def _on_service_status_change(self, is_running: bool):
@@ -850,8 +994,9 @@ class ExtendScreenTrayApp:
 
     def _update_tray_state(self, is_running: bool):
         mode_name = "USB Cable" if self.control_win.mode_var.get() == "cable" else "Wi-Fi"
+        fps = self.control_win.get_fps()
         self.tray.icon = self.img_on if is_running else self.img_off
-        self.tray.title = f"ExtendScreen: {'ON (' + mode_name + ')' if is_running else 'OFF'}"
+        self.tray.title = f"ExtendScreen: {'ON (' + mode_name + ' @ ' + str(fps) + 'fps)' if is_running else 'OFF'}"
         try:
             self.tray.update_menu()
         except Exception:
