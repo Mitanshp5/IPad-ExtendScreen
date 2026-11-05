@@ -84,6 +84,20 @@ curl.exe -s -m 120 -F "file=@C:\Code\ExtendScreen\ExtendScreen-1.0.8.deb" http:/
 
 ## Running the Host
 
+### System Tray Controller (Recommended)
+
+Double-click `start-tray.cmd` to start ExtendScreen in your Windows system tray.
+- **Click the tray icon**: Opens a floating control card directly above the system tray.
+- **ON / OFF Toggle**:
+  - **ON**: Starts screen streaming services (USB Cable mode or Wi-Fi mode).
+  - **OFF**: Immediately kills all host processes (`screen-host.py`, `ffmpeg.exe`) and restores Windows display to single-screen.
+- **Start with Windows**: Toggle the checkbox in the flyout card to launch on boot automatically.
+- **Right-Click**: Quick context menu to toggle ON/OFF, open controls, or exit.
+
+---
+
+### Command-Line / Batch Scripts
+
 ### USB Cable Mode (Recommended)
 
 1. Open **Extend Screen** on the iPad.
