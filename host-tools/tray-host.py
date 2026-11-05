@@ -20,15 +20,10 @@ import sys
 import threading
 import time
 import tkinter as tk
-from tkinter import ttk
 from typing import Optional
 
-try:
-    from PIL import Image, ImageTk, ImageEnhance
-except ImportError:
-    Image = None
-    ImageTk = None
-    ImageEnhance = None
+from PIL import Image, ImageTk, ImageEnhance
+import pystray
 
 # DPI Awareness
 try:
@@ -42,44 +37,12 @@ except Exception:
 ROOT_DIR = pathlib.Path(__file__).resolve().parents[1]
 HOST_SCRIPT = ROOT_DIR / "host-tools" / "screen-host.py"
 ICON_PNG = ROOT_DIR / "screen" / "Resources" / "Icon.png"
-ICO_PATH = ROOT_DIR / "host-tools" / "icon.ico"
-ICO_ON_PATH = ROOT_DIR / "host-tools" / "icon_on.ico"
-ICO_OFF_PATH = ROOT_DIR / "host-tools" / "icon_off.ico"
 LOG_FILE = ROOT_DIR / "host-tools" / "tray.log"
 
-# Win32 Constants
-WM_USER = 0x0400
-WM_TRAY_CALLBACK = WM_USER + 20
-WM_LBUTTONUP = 0x0202
-WM_RBUTTONUP = 0x0205
-WM_LBUTTONDBLCLK = 0x0203
-NIM_ADD = 0x00000000
-NIM_MODIFY = 0x00000001
-NIM_DELETE = 0x00000002
-NIF_MESSAGE = 0x00000001
-NIF_ICON = 0x00000002
-NIF_TIP = 0x00000004
-IMAGE_ICON = 1
-LR_LOADFROMFILE = 0x00000010
-TPM_RETURNCMD = 0x0100
-TPM_NONOTIFY = 0x0080
-MF_STRING = 0x0000
-MF_SEPARATOR = 0x0800
-MF_GRAYED = 0x0001
 SPI_GETWORKAREA = 0x0030
 CREATE_NO_WINDOW = 0x08000000
 
 user32 = ctypes.windll.user32
-kernel32 = ctypes.windll.kernel32
-shell32 = ctypes.windll.shell32
-
-LRESULT = ctypes.c_int64
-WPARAM = ctypes.c_uint64
-LPARAM = ctypes.c_int64
-
-user32.DefWindowProcW.restype = LRESULT
-user32.DefWindowProcW.argtypes = [wintypes.HWND, wintypes.UINT, WPARAM, LPARAM]
-WNDPROC = ctypes.WINFUNCTYPE(LRESULT, wintypes.HWND, wintypes.UINT, WPARAM, LPARAM)
 
 
 class RECT(ctypes.Structure):
@@ -93,59 +56,6 @@ class RECT(ctypes.Structure):
 
 class POINT(ctypes.Structure):
     _fields_ = [("x", wintypes.LONG), ("y", wintypes.LONG)]
-
-
-class NOTIFYICONDATAW(ctypes.Structure):
-    _fields_ = [
-        ("cbSize", wintypes.DWORD),
-        ("hWnd", wintypes.HWND),
-        ("uID", wintypes.UINT),
-        ("uFlags", wintypes.UINT),
-        ("uCallbackMessage", wintypes.UINT),
-        ("hIcon", wintypes.HICON),
-        ("szTip", wintypes.WCHAR * 128),
-        ("dwState", wintypes.DWORD),
-        ("dwStateMask", wintypes.DWORD),
-        ("szInfo", wintypes.WCHAR * 256),
-        ("uTimeoutOrVersion", wintypes.UINT),
-        ("szInfoTitle", wintypes.WCHAR * 64),
-        ("dwInfoFlags", wintypes.DWORD),
-    ]
-
-
-class WNDCLASSEXW(ctypes.Structure):
-    _fields_ = [
-        ("cbSize", wintypes.UINT),
-        ("style", wintypes.UINT),
-        ("lpfnWndProc", WNDPROC),
-        ("cbClsExtra", ctypes.c_int),
-        ("cbWndExtra", ctypes.c_int),
-        ("hInstance", wintypes.HINSTANCE),
-        ("hIcon", wintypes.HICON),
-        ("hCursor", wintypes.HICON),
-        ("hbrBackground", wintypes.HBRUSH),
-        ("lpszMenuName", wintypes.LPCWSTR),
-        ("lpszClassName", wintypes.LPCWSTR),
-        ("hIconSm", wintypes.HICON),
-    ]
-
-
-def ensure_ico_files() -> None:
-    """Ensure icon.ico, icon_on.ico, and icon_off.ico exist."""
-    if not ICO_PATH.exists() or not ICO_ON_PATH.exists() or not ICO_OFF_PATH.exists():
-        if Image and ICON_PNG.exists():
-            try:
-                base = Image.open(ICON_PNG)
-                base.save(ICO_PATH, format="ICO", sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64)])
-                base.save(ICO_ON_PATH, format="ICO", sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64)])
-                if ImageEnhance:
-                    enh = ImageEnhance.Brightness(base.convert("L").convert("RGBA"))
-                    dimmed = enh.enhance(0.55)
-                    dimmed.save(ICO_OFF_PATH, format="ICO", sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64)])
-                else:
-                    base.save(ICO_OFF_PATH, format="ICO", sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64)])
-            except Exception as e:
-                print(f"Error generating ICOs: {e}", file=sys.stderr)
 
 
 # =====================================================================
@@ -197,7 +107,6 @@ class ExtendServiceManager:
                 bufsize=1,
             )
 
-            # Background thread to pipe logs and detect unexpected terminations
             self.monitor_thread = threading.Thread(target=self._monitor_process, daemon=True)
             self.monitor_thread.start()
 
@@ -223,7 +132,6 @@ class ExtendServiceManager:
             pass
         finally:
             if not self.stop_requested:
-                # Process exited on its own (or crashed/disconnected)
                 self.proc = None
                 if self.on_status_change:
                     self.on_status_change(False)
@@ -311,7 +219,7 @@ class SmoothToggle(tk.Canvas):
         self.height = height
         self.command = command
         self.is_on = False
-        self.current_x = 3.0  # knob position
+        self.current_x = 3.0
         self.target_x = 3.0
         self.animating = False
 
@@ -355,7 +263,6 @@ class SmoothToggle(tk.Canvas):
         kd = self.height - pad * 2
         r = self.height / 2.0
 
-        # Interpolate color: OFF (#3B3B44) to ON (#0078D4)
         t = (self.current_x - pad) / max(1.0, (self.width - kd - pad * 2))
         t = max(0.0, min(1.0, t))
 
@@ -364,12 +271,10 @@ class SmoothToggle(tk.Canvas):
         b_c = int(68 * (1 - t) + 212 * t)
         track_color = f"#{r_c:02x}{g_c:02x}{b_c:02x}"
 
-        # Draw pill track
         self.create_oval(0, 0, self.height, self.height, fill=track_color, outline="")
         self.create_oval(self.width - self.height, 0, self.width, self.height, fill=track_color, outline="")
         self.create_rectangle(r, 0, self.width - r, self.height, fill=track_color, outline="")
 
-        # Draw Knob
         kx = self.current_x
         self.create_oval(kx, pad, kx + kd, pad + kd, fill="#FFFFFF", outline="")
 
@@ -389,7 +294,7 @@ class TrayFlyout(tk.Toplevel):
         self.overrideredirect(True)
         self.attributes("-topmost", True)
         self.configure(bg="#1A1A22")
-        self.withdraw()  # start hidden
+        self.withdraw()
 
         self.width = 330
         self.height = 310
@@ -397,23 +302,21 @@ class TrayFlyout(tk.Toplevel):
         self.icon_photo: Optional[ImageTk.PhotoImage] = None
         self._init_ui()
 
-        # Keyboard & click dismissals
         self.bind("<Escape>", lambda e: self.hide())
         self.poll_active = False
 
     def _init_ui(self):
-        # Outer Border / Container
         outer = tk.Frame(self, bg="#33333E", padx=1, pady=1)
         outer.pack(fill="both", expand=True)
 
         inner = tk.Frame(outer, bg="#181820", padx=16, pady=14)
         inner.pack(fill="both", expand=True)
 
-        # 1. Header (Icon, Title, Close Button)
+        # Header
         header = tk.Frame(inner, bg="#181820")
         header.pack(fill="x", pady=(0, 12))
 
-        if Image and ImageTk and ICON_PNG.exists():
+        if ICON_PNG.exists():
             try:
                 im = Image.open(ICON_PNG).resize((22, 22), Image.Resampling.LANCZOS)
                 self.icon_photo = ImageTk.PhotoImage(im)
@@ -444,7 +347,7 @@ class TrayFlyout(tk.Toplevel):
         btn_close.bind("<Enter>", lambda e: btn_close.configure(fg="#FFFFFF"))
         btn_close.bind("<Leave>", lambda e: btn_close.configure(fg="#9CA3AF"))
 
-        # 2. Main Toggle Card
+        # Main Toggle Card
         self.card = tk.Frame(inner, bg="#22222C", padx=14, pady=12, highlightthickness=1, highlightbackground="#363644")
         self.card.pack(fill="x", pady=(0, 12))
 
@@ -469,7 +372,7 @@ class TrayFlyout(tk.Toplevel):
         self.toggle = SmoothToggle(self.card, width=54, height=28, command=self._on_toggle, bg="#22222C")
         self.toggle.pack(side="right", padx=(8, 0))
 
-        # 3. Connection Mode Radio Group
+        # Connection Mode Radio Group
         mode_box = tk.LabelFrame(
             inner,
             text=" Connection Mode ",
@@ -517,7 +420,7 @@ class TrayFlyout(tk.Toplevel):
         )
         rb_wifi.pack(anchor="w", pady=(4, 0))
 
-        # 4. Info Footer & Action Bar
+        # Footer
         footer = tk.Frame(inner, bg="#181820")
         footer.pack(fill="x", side="bottom")
 
@@ -562,7 +465,6 @@ class TrayFlyout(tk.Toplevel):
 
     def _on_mode_change(self):
         if self.manager.is_running():
-            # Restart in new mode
             mode = self.mode_var.get()
             self.manager.start(mode)
             self.update_state(True)
@@ -580,21 +482,21 @@ class TrayFlyout(tk.Toplevel):
             self.card.configure(highlightbackground="#363644")
 
     def show_above_tray(self):
-        """Position the box neatly right above the system tray."""
         pt = POINT()
         user32.GetCursorPos(ctypes.byref(pt))
 
-        # Query usable desktop work area
         wa = RECT()
         user32.SystemParametersInfoW(SPI_GETWORKAREA, 0, ctypes.byref(wa), 0)
 
-        # Center horizontally over cursor if cursor is in bottom right
         x = min(wa.right - self.width - 12, max(wa.left + 12, pt.x - self.width // 2))
         y = wa.bottom - self.height - 8
+        if pt.y < (wa.top + wa.bottom) // 2:
+            y = wa.top + 8
 
         self.geometry(f"{self.width}x{self.height}+{x}+{y}")
         self.deiconify()
         self.lift()
+        self.attributes("-topmost", True)
         self.focus_force()
 
         self.poll_active = True
@@ -612,11 +514,9 @@ class TrayFlyout(tk.Toplevel):
             self.show_above_tray()
 
     def _poll_click_outside(self):
-        """Dismiss popup if the user clicks anywhere outside."""
         if not self.poll_active or not self.winfo_viewable():
             return
 
-        # Check left mouse button state (0x01 = VK_LBUTTON)
         if user32.GetAsyncKeyState(0x01) & 0x8000:
             pt = POINT()
             user32.GetCursorPos(ctypes.byref(pt))
@@ -625,9 +525,7 @@ class TrayFlyout(tk.Toplevel):
             ww = self.winfo_width()
             wh = self.winfo_height()
 
-            # If click was outside our popup window
             if not (wx <= pt.x <= wx + ww and wy <= pt.y <= wy + wh):
-                # Allow a tiny margin for tray icon clicks
                 self.hide()
                 return
 
@@ -663,168 +561,77 @@ class TrayFlyout(tk.Toplevel):
 
 
 # =====================================================================
-# Win32 System Tray Icon
-# =====================================================================
-
-class Win32Tray:
-    """Creates a Win32 system tray notification icon and message handler."""
-
-    def __init__(self, on_left_click=None, on_right_click=None):
-        self.on_left_click = on_left_click
-        self.on_right_click = on_right_click
-        self.hwnd: Optional[wintypes.HWND] = None
-        self.hicon: Optional[wintypes.HICON] = None
-        self.atom = 0
-        self.is_running = True
-        self.thread: Optional[threading.Thread] = None
-
-    def start(self):
-        self.thread = threading.Thread(target=self._run, daemon=True)
-        self.thread.start()
-
-    def _run(self):
-        hinst = kernel32.GetModuleHandleW(None)
-
-        def wnd_proc(hwnd, msg, wparam, lparam):
-            if msg == WM_TRAY_CALLBACK:
-                event = lparam & 0xFFFF
-                if event == WM_LBUTTONUP:
-                    if self.on_left_click:
-                        self.on_left_click()
-                elif event == WM_RBUTTONUP:
-                    if self.on_right_click:
-                        self.on_right_click()
-                return 0
-            return user32.DefWindowProcW(hwnd, msg, wparam, lparam)
-
-        self.proc = WNDPROC(wnd_proc)
-
-        wc = WNDCLASSEXW()
-        wc.cbSize = ctypes.sizeof(WNDCLASSEXW)
-        wc.lpfnWndProc = self.proc
-        wc.hInstance = hinst
-        wc.lpszClassName = f"ExtendScreenTray_{os.getpid()}"
-
-        self.atom = user32.RegisterClassExW(ctypes.byref(wc))
-        self.hwnd = user32.CreateWindowExW(0, self.atom, "ExtendScreenTrayHostWindow", 0, 0, 0, 0, 0, 0, 0, hinst, None)
-
-        self.update_icon(is_active=False)
-
-        msg = wintypes.MSG()
-        while user32.GetMessageW(ctypes.byref(msg), 0, 0, 0) > 0:
-            user32.TranslateMessage(ctypes.byref(msg))
-            user32.DispatchMessageW(ctypes.byref(msg))
-
-    def update_icon(self, is_active: bool):
-        if not self.hwnd:
-            return
-
-        ico_file = ICO_ON_PATH if is_active else ICO_OFF_PATH
-        if not ico_file.exists():
-            ico_file = ICO_PATH
-
-        hicon = user32.LoadImageW(None, str(ico_file), IMAGE_ICON, 0, 0, LR_LOADFROMFILE)
-        if not hicon:
-            hicon = user32.LoadIconW(None, 32512)  # IDI_APPLICATION fallback
-
-        tip = f"ExtendScreen: {'ON (Running)' if is_active else 'OFF (Stopped)'}"
-
-        nid = NOTIFYICONDATAW()
-        nid.cbSize = ctypes.sizeof(NOTIFYICONDATAW)
-        nid.hWnd = self.hwnd
-        nid.uID = 1
-        nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP
-        nid.uCallbackMessage = WM_TRAY_CALLBACK
-        nid.hIcon = hicon
-        nid.szTip = tip
-
-        shell32.Shell_NotifyIconW(NIM_MODIFY, ctypes.byref(nid)) or shell32.Shell_NotifyIconW(NIM_ADD, ctypes.byref(nid))
-
-    def remove(self):
-        if self.hwnd:
-            nid = NOTIFYICONDATAW()
-            nid.cbSize = ctypes.sizeof(NOTIFYICONDATAW)
-            nid.hWnd = self.hwnd
-            nid.uID = 1
-            shell32.Shell_NotifyIconW(NIM_DELETE, ctypes.byref(nid))
-            user32.PostMessageW(self.hwnd, 0x0012, 0, 0)  # WM_QUIT
-
-
-# =====================================================================
-# Main Application Controller
+# Main Application Controller (Pystray + Tkinter)
 # =====================================================================
 
 class ExtendScreenTrayApp:
     def __init__(self):
-        ensure_ico_files()
-
-        # Check if already running by window title
-        existing = user32.FindWindowW(None, "ExtendScreenTrayHostWindow")
-        if existing:
-            # Wake up existing instance and toggle flyout
-            user32.PostMessageW(existing, WM_TRAY_CALLBACK, 0, WM_LBUTTONUP)
+        # Prevent duplicate instances
+        hwnd_existing = user32.FindWindowW(None, "ExtendScreenTrayHiddenHost")
+        if hwnd_existing:
             sys.exit(0)
 
         self.root = tk.Tk()
-        self.root.withdraw()  # Root remains invisible
+        self.root.title("ExtendScreenTrayHiddenHost")
+        self.root.withdraw()
+
+        self.img_on = Image.open(ICON_PNG)
+        enh = ImageEnhance.Brightness(self.img_on.convert("L").convert("RGBA"))
+        self.img_off = enh.enhance(0.55)
 
         self.manager = ExtendServiceManager(on_status_change=self._on_service_status_change)
         self.flyout = TrayFlyout(self.root, self.manager, on_exit=self.quit_app)
 
-        self.tray = Win32Tray(
-            on_left_click=self._on_tray_left_click,
-            on_right_click=self._on_tray_right_click,
+        # Setup Pystray Tray Icon
+        menu = pystray.Menu(
+            pystray.MenuItem("Open Controls", self._tray_left_click, default=True),
+            pystray.MenuItem(lambda text: "Turn OFF (Kill All)" if self.manager.is_running() else "Turn ON", self._tray_toggle_service),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem("Exit", lambda: self.root.after(0, self.quit_app)),
         )
-        self.tray.start()
 
-    def _on_tray_left_click(self):
+        self.tray = pystray.Icon(
+            "ExtendScreen",
+            self.img_off,
+            "ExtendScreen: OFF",
+            menu=menu,
+        )
+        self.tray.run_detached()
+
+    def _tray_left_click(self, icon=None, item=None):
         self.root.after(0, self.flyout.toggle_visibility)
 
-    def _on_tray_right_click(self):
-        self.root.after(0, self._show_native_menu)
-
-    def _show_native_menu(self):
-        pt = POINT()
-        user32.GetCursorPos(ctypes.byref(pt))
-
-        hmenu = user32.CreatePopupMenu()
-        is_on = self.manager.is_running()
-
-        status_text = f"ExtendScreen: {'ON' if is_on else 'OFF'}"
-        user32.AppendMenuW(hmenu, MF_STRING | MF_GRAYED, 0, status_text)
-        user32.AppendMenuW(hmenu, MF_SEPARATOR, 0, None)
-        user32.AppendMenuW(hmenu, MF_STRING, 1, "Turn OFF (Kill All)" if is_on else "Turn ON")
-        user32.AppendMenuW(hmenu, MF_STRING, 2, "Open Controls...")
-        user32.AppendMenuW(hmenu, MF_SEPARATOR, 0, None)
-        user32.AppendMenuW(hmenu, MF_STRING, 3, "Exit")
-
-        # Required before and after TrackPopupMenu for tray icons
-        user32.SetForegroundWindow(self.tray.hwnd or self.flyout.winfo_id())
-        cmd = user32.TrackPopupMenuEx(hmenu, TPM_RETURNCMD | TPM_NONOTIFY, pt.x, pt.y, self.tray.hwnd, None)
-        user32.DestroyMenu(hmenu)
-        user32.PostMessageW(self.tray.hwnd, 0, 0, 0)
-
-        if cmd == 1:
-            if is_on:
+    def _tray_toggle_service(self, icon=None, item=None):
+        def _toggle():
+            if self.manager.is_running():
                 self.manager.kill_all(reset_display=True)
             else:
                 self.manager.start(self.flyout.mode_var.get())
             self.flyout.update_state(self.manager.is_running())
-        elif cmd == 2:
-            self.flyout.show_above_tray()
-        elif cmd == 3:
-            self.quit_app()
+            self._update_tray_state(self.manager.is_running())
+        self.root.after(0, _toggle)
 
     def _on_service_status_change(self, is_running: bool):
         def _update():
-            self.tray.update_icon(is_active=is_running)
+            self._update_tray_state(is_running)
             self.flyout.update_state(is_running)
         self.root.after(0, _update)
 
+    def _update_tray_state(self, is_running: bool):
+        mode_name = "USB Cable" if self.flyout.mode_var.get() == "cable" else "Wi-Fi"
+        self.tray.icon = self.img_on if is_running else self.img_off
+        self.tray.title = f"ExtendScreen: {'ON (' + mode_name + ')' if is_running else 'OFF'}"
+        try:
+            self.tray.update_menu()
+        except Exception:
+            pass
+
     def quit_app(self):
-        # Kill all processes and reset display before exiting
         self.manager.kill_all(reset_display=True)
-        self.tray.remove()
+        try:
+            self.tray.stop()
+        except Exception:
+            pass
         self.root.destroy()
         sys.exit(0)
 
@@ -833,14 +640,8 @@ class ExtendScreenTrayApp:
 
 
 def main():
-    try:
-        app = ExtendScreenTrayApp()
-        app.run()
-    except Exception:
-        import traceback
-        with open(ROOT_DIR / "host-tools" / "tray_crash.log", "w", encoding="utf-8") as f:
-            traceback.print_exc(file=f)
-        raise
+    app = ExtendScreenTrayApp()
+    app.run()
 
 
 if __name__ == "__main__":
