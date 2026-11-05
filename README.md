@@ -22,10 +22,10 @@ For deep-dive architectural details and protocol specifications, see [ARCHITECTU
 
 | Service | Address / Port | Role |
 |---|---|---|
-| **iPad iFile Web Server** | `http://192.168.0.109:10000` | Package upload and log inspection |
+| **iPad iFile Web Server** | `http://<iPad-IP>:10000` | Package upload and log inspection |
 | **PC usbmuxd Service** | `127.0.0.1:27015` | Apple Mobile Device USB multiplexer |
 | **iPad USB Cable Listener** | `127.0.0.1:8765` | Device-side loopback listener |
-| **PC Wi-Fi Streaming Host** | `http://192.168.0.108:8644` | Wi-Fi HTTP streaming & pairing server |
+| **PC Wi-Fi Streaming Host** | `http://<PC-IP>:8644` | Wi-Fi HTTP streaming & pairing server |
 
 ---
 
@@ -65,12 +65,12 @@ wsl -d Ubuntu -e bash -c "cp /home/mitansh/.cache/extendscreen-build/screen/pack
 ### 1. Enable Web Server in iFile
 1. Open **iFile** on the iPad.
 2. Tap the **Wi-Fi icon** (center button on the bottom toolbar).
-3. iFile will display: `Web Server on: http://<iPad-IP>:10000/` (typically `http://192.168.0.109:10000`).
+3. iFile will display: `Web Server on: http://<iPad-IP>:10000/` (for example `http://192.168.1.50:10000`).
 
 ### 2. Upload the Package via cURL
 Run from your PC:
 ```powershell
-curl.exe -s -m 120 -F "file=@C:\Code\ExtendScreen\ExtendScreen-1.0.7.deb" http://192.168.0.109:10000/upload
+curl.exe -s -m 120 -F "file=@C:\Code\ExtendScreen\ExtendScreen-1.0.7.deb" http://<iPad-IP>:10000/upload
 ```
 
 ### 3. Install on Device
@@ -102,7 +102,7 @@ curl.exe -s -m 120 -F "file=@C:\Code\ExtendScreen\ExtendScreen-1.0.7.deb" http:/
 ### Wi-Fi Mode
 
 1. Open **Extend Screen** on the iPad.
-2. In **Settings**, select **Connection mode: Wi-Fi**, and set Server URL to `http://192.168.0.108:8644`.
+2. In **Settings**, select **Connection mode: Wi-Fi**, and set Server URL to `http://<PC-IP>:8644`.
 3. On the PC, run:
    ```cmd
    start-extend-host.cmd
@@ -120,7 +120,7 @@ To read the log:
 - **In iFile**: Navigate to `/` -> `tmp` -> `ExtendScreen.log`.
 - **Via cURL (when iFile web server is on)**:
   ```powershell
-  curl.exe -s http://192.168.0.109:10000/../../tmp/ExtendScreen.log
+  curl.exe -s http://<iPad-IP>:10000/../../tmp/ExtendScreen.log
   ```
 
 ### Checking USB Connection (`usbmuxd`)

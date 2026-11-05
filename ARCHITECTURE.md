@@ -21,7 +21,7 @@ ExtendScreen allows using an iPad mini (1st Generation, iOS 9.3.5) as an extende
 |                   v                          |                 v                |
 |  +-------------------------------------+     |   +---------------------------+  |
 |  | Apple Mobile Device usbmuxd         |     |   | HTTP Server               |  |
-|  | Listening on 127.0.0.1:27015        |     |   | 192.168.0.108:8644        |  |
+|  | Listening on 127.0.0.1:27015        |     |   | <PC-IP>:8644              |  |
 |  +-------------------------------------+     |   +---------------------------+  |
 +-------------------|--------------------------+-----------------|----------------+
                     | (USB Lightning Cable)                      | (LAN Wi-Fi)
@@ -34,7 +34,7 @@ ExtendScreen allows using an iPad mini (1st Generation, iOS 9.3.5) as an extende
 |  |                                                                           |  |
 |  |  [USB Transport]                     [Wi-Fi Transport]                    |  |
 |  |  PSCableServer                        PSStreamClient                      |  |
-|  |  Listens: 127.0.0.1:8765              Connects: http://192.168.0.108:8644 |  |
+|  |  Listens: 127.0.0.1:8765              Connects: http://<PC-IP>:8644       |  |
 |  |                                                                           |  |
 |  |  [View & Input Controller]                                                |  |
 |  |  PSScreenViewController                                                   |  |
@@ -48,7 +48,7 @@ ExtendScreen allows using an iPad mini (1st Generation, iOS 9.3.5) as an extende
 |                                                                                 |
 |  +---------------------------------------------------------------------------+  |
 |  | iFile Web Server (for package install & log inspection)                   |  |
-|  | Listening on: http://192.168.0.109:10000                                  |  |
+|  | Listening on: http://<iPad-IP>:10000                                      |  |
 |  +---------------------------------------------------------------------------+  |
 +---------------------------------------------------------------------------------+
 ```
@@ -59,10 +59,10 @@ ExtendScreen allows using an iPad mini (1st Generation, iOS 9.3.5) as an extende
 
 | Entity | Protocol / Transport | Address / Port | Description |
 |---|---|---|---|
-| **iPad iFile Web Server** | HTTP | `http://192.168.0.109:10000` | Used for uploading `.deb` installers and reading `/tmp/ExtendScreen.log`. |
+| **iPad iFile Web Server** | HTTP | `http://<iPad-IP>:10000` | Used for uploading `.deb` installers and reading logs. |
 | **PC usbmuxd Daemon** | Apple USBMUX | `127.0.0.1:27015` | Apple Mobile Device Service multiplexer on PC. |
 | **iPad USB Cable Listener** | TCP (Local loopback) | `127.0.0.1:8765` | Reached through usbmuxd tunnel over the USB cable. |
-| **PC Wi-Fi Streaming Host** | HTTP MJPEG | `http://192.168.0.108:8644` | Wi-Fi streaming server (serves `/stream`, handles `/pair` & `/input`). |
+| **PC Wi-Fi Streaming Host** | HTTP MJPEG | `http://<PC-IP>:8644` | Wi-Fi streaming server (serves `/stream`, handles `/pair` & `/input`). |
 
 ---
 

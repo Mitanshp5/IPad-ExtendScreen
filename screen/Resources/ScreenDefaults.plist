@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
 	<key>ExtendScreenServerURL</key>
-	<string>http://192.168.0.108:8644</string>
+	<string></string>
 	<key>ExtendScreenFPS</key>
 	<integer>12</integer>
 	<key>ExtendScreenInputEnabled</key>

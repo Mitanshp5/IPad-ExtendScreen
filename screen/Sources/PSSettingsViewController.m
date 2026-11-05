@@ -109,7 +109,7 @@
                forControlEvents:UIControlEventEditingChanged];
     NSString *savedURL = [[NSUserDefaults standardUserDefaults] stringForKey:PSServerURLKey];
     self.serverField.text = savedURL.length ? savedURL : bundled[PSServerURLKey];
-    self.serverField.placeholder = @"http://192.168.0.108:8644";
+    self.serverField.placeholder = @"http://192.168.1.100:8644";
     self.serverField.accessibilityLabel = @"PC host origin";
 
     self.keyTitle = [self label:@"Eight-digit Wi-Fi pairing code from the PC"];
@@ -214,7 +214,7 @@
         if (!parts.host.length || !([scheme isEqualToString:@"http"] || [scheme isEqualToString:@"https"]) ||
             parts.user.length || parts.password.length || parts.query.length || parts.fragment.length ||
             (parts.path.length && ![parts.path isEqualToString:@"/"])) {
-            self.resultLabel.text = @"Use the host origin only, such as http://192.168.0.108:8644, without a path, credentials, query or fragment.";
+            self.resultLabel.text = @"Use the host origin only, such as http://192.168.1.100:8644, without a path, credentials, query or fragment.";
             return;
         }
     }

@@ -113,7 +113,7 @@ static const NSUInteger PSMaximumHealthBytes = 8192;
     }
     NSURLComponents *parts = nil;
     if (![self prepareOrigin:serverURL plain:NULL result:&parts]) {
-        [self finish:NO message:@"Use the host origin only, such as http://192.168.0.108:8644. HTTP requires a private numeric LAN address."];
+        [self finish:NO message:@"Use the host origin only, such as http://192.168.1.100:8644. HTTP requires a private numeric LAN address."];
         return;
     }
     parts.path = @"/health";
@@ -143,7 +143,7 @@ static const NSUInteger PSMaximumHealthBytes = 8192;
     }
     NSURLComponents *parts = nil;
     if (![self prepareOrigin:serverURL plain:NULL result:&parts]) {
-        [self finish:NO message:@"Use the host origin only, such as http://192.168.0.108:8644. HTTP requires a private numeric LAN address."];
+        [self finish:NO message:@"Use the host origin only, such as http://192.168.1.100:8644. HTTP requires a private numeric LAN address."];
         return;
     }
     parts.path = @"/pair";
