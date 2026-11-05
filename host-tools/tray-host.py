@@ -395,40 +395,55 @@ class SmoothToggle(tk.Canvas):
 # Control Window (Positioned nicely above the system tray)
 # =====================================================================
 
+class MONITORINFO(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", wintypes.DWORD),
+        ("rcMonitor", RECT),
+        ("rcWork", RECT),
+        ("dwFlags", wintypes.DWORD),
+    ]
+
+
 class ControlWindow(tk.Toplevel):
-    """Modern dark control card window."""
+    """Modern dark control card window positioned above the system tray."""
 
     def __init__(self, master, manager: ExtendServiceManager, on_exit=None):
         super().__init__(master)
         self.manager = manager
         self.on_exit = on_exit
 
-        self.title("ExtendScreen Controls")
-        self.configure(bg="#181820")
+        self.overrideredirect(True)
+        self.attributes("-topmost", True)
+        self.configure(bg="#121218")
         self.resizable(False, False)
-        self.width = 340
-        self.height = 320
+        self.width = 330
+        self.height = 280
+        self.opened_at = 0.0
 
-        # Close button hides to tray instead of quitting
-        self.protocol("WM_DELETE_WINDOW", self.hide)
         self.withdraw()
 
         self.icon_photo: Optional[ImageTk.PhotoImage] = None
         self._init_ui()
 
+        self.bind("<Escape>", lambda e: self.hide())
+
     def _init_ui(self):
-        inner = tk.Frame(self, bg="#181820", padx=16, pady=14)
+        # 1px border frame around the card
+        border_frame = tk.Frame(self, bg="#333342", padx=1, pady=1)
+        border_frame.pack(fill="both", expand=True)
+
+        inner = tk.Frame(border_frame, bg="#181822", padx=16, pady=14)
         inner.pack(fill="both", expand=True)
 
         # Header
-        header = tk.Frame(inner, bg="#181820")
-        header.pack(fill="x", pady=(0, 12))
+        header = tk.Frame(inner, bg="#181822")
+        header.pack(fill="x", pady=(0, 10))
 
         if ICON_PNG.exists():
             try:
-                im = Image.open(ICON_PNG).resize((24, 24), Image.Resampling.LANCZOS)
+                im = Image.open(ICON_PNG).resize((22, 22), Image.Resampling.LANCZOS)
                 self.icon_photo = ImageTk.PhotoImage(im)
-                lbl_icon = tk.Label(header, image=self.icon_photo, bg="#181820")
+                lbl_icon = tk.Label(header, image=self.icon_photo, bg="#181822")
                 lbl_icon.pack(side="left", padx=(0, 8))
             except Exception:
                 pass
@@ -436,9 +451,9 @@ class ControlWindow(tk.Toplevel):
         lbl_title = tk.Label(
             header,
             text="ExtendScreen",
-            font=("Segoe UI", 12, "bold"),
+            font=("Segoe UI", 11, "bold"),
             fg="#FFFFFF",
-            bg="#181820",
+            bg="#181822",
         )
         lbl_title.pack(side="left")
 
@@ -447,7 +462,7 @@ class ControlWindow(tk.Toplevel):
             text="✕",
             font=("Segoe UI", 10),
             fg="#9CA3AF",
-            bg="#181820",
+            bg="#181822",
             cursor="hand2",
         )
         btn_min.pack(side="right")
@@ -456,29 +471,29 @@ class ControlWindow(tk.Toplevel):
         btn_min.bind("<Leave>", lambda e: btn_min.configure(fg="#9CA3AF"))
 
         # Main Toggle Card
-        self.card = tk.Frame(inner, bg="#22222C", padx=14, pady=12, highlightthickness=1, highlightbackground="#363644")
-        self.card.pack(fill="x", pady=(0, 12))
+        self.card = tk.Frame(inner, bg="#22222E", padx=14, pady=10, highlightthickness=1, highlightbackground="#363648")
+        self.card.pack(fill="x", pady=(0, 10))
 
-        card_left = tk.Frame(self.card, bg="#22222C")
+        card_left = tk.Frame(self.card, bg="#22222E")
         card_left.pack(side="left", fill="both", expand=True)
 
-        lbl_serv = tk.Label(card_left, text="Screen Sharing", font=("Segoe UI", 9), fg="#9CA3AF", bg="#22222C")
+        lbl_serv = tk.Label(card_left, text="Screen Sharing", font=("Segoe UI", 8), fg="#9CA3AF", bg="#22222E")
         lbl_serv.pack(anchor="w")
 
-        self.lbl_status = tk.Label(card_left, text="OFF", font=("Segoe UI", 15, "bold"), fg="#9CA3AF", bg="#22222C")
-        self.lbl_status.pack(anchor="w", pady=(2, 0))
+        self.lbl_status = tk.Label(card_left, text="OFF", font=("Segoe UI", 14, "bold"), fg="#9CA3AF", bg="#22222E")
+        self.lbl_status.pack(anchor="w", pady=(1, 0))
 
         self.lbl_substatus = tk.Label(
             card_left,
             text="All services stopped",
             font=("Segoe UI", 8),
             fg="#6B7280",
-            bg="#22222C",
+            bg="#22222E",
         )
         self.lbl_substatus.pack(anchor="w")
 
-        self.toggle = SmoothToggle(self.card, width=54, height=28, command=self._on_toggle, bg="#22222C")
-        self.toggle.pack(side="right", padx=(8, 0))
+        self.toggle = SmoothToggle(self.card, width=54, height=28, command=self._on_toggle, bg="#22222E")
+        self.toggle.pack(side="right", padx=(6, 0))
 
         # Connection Mode Radio Group
         mode_box = tk.LabelFrame(
@@ -486,13 +501,13 @@ class ControlWindow(tk.Toplevel):
             text=" Connection Mode ",
             font=("Segoe UI", 8, "bold"),
             fg="#9CA3AF",
-            bg="#181820",
+            bg="#181822",
             padx=10,
-            pady=8,
+            pady=6,
             highlightthickness=1,
-            highlightbackground="#2C2C38",
+            highlightbackground="#2C2C3C",
         )
-        mode_box.pack(fill="x", pady=(0, 12))
+        mode_box.pack(fill="x", pady=(0, 10))
 
         self.mode_var = tk.StringVar(value="cable")
 
@@ -501,11 +516,11 @@ class ControlWindow(tk.Toplevel):
             text="USB Cable (Recommended, 45 fps)",
             variable=self.mode_var,
             value="cable",
-            font=("Segoe UI", 9),
+            font=("Segoe UI", 8),
             fg="#E5E7EB",
-            bg="#181820",
-            selectcolor="#181820",
-            activebackground="#181820",
+            bg="#181822",
+            selectcolor="#181822",
+            activebackground="#181822",
             activeforeground="#FFFFFF",
             command=self._on_mode_change,
             cursor="hand2",
@@ -517,43 +532,40 @@ class ControlWindow(tk.Toplevel):
             text="Wi-Fi (HTTP Streaming)",
             variable=self.mode_var,
             value="wifi",
-            font=("Segoe UI", 9),
+            font=("Segoe UI", 8),
             fg="#E5E7EB",
-            bg="#181820",
-            selectcolor="#181820",
-            activebackground="#181820",
+            bg="#181822",
+            selectcolor="#181822",
+            activebackground="#181822",
             activeforeground="#FFFFFF",
             command=self._on_mode_change,
             cursor="hand2",
         )
-        rb_wifi.pack(anchor="w", pady=(4, 0))
+        rb_wifi.pack(anchor="w", pady=(2, 0))
 
         # Footer
-        footer = tk.Frame(inner, bg="#181820")
+        footer = tk.Frame(inner, bg="#181822")
         footer.pack(fill="x", side="bottom")
 
-        btn_hide = tk.Button(
+        btn_hide = tk.Label(
             footer,
             text="Hide to Tray",
             font=("Segoe UI", 8),
-            fg="#E5E7EB",
-            bg="#2A2A36",
-            activebackground="#3A3A4A",
-            activeforeground="#FFFFFF",
-            relief="flat",
-            command=self.hide,
+            fg="#9CA3AF",
+            bg="#181822",
             cursor="hand2",
-            padx=8,
-            pady=2,
         )
         btn_hide.pack(side="left")
+        btn_hide.bind("<Button-1>", lambda e: self.hide())
+        btn_hide.bind("<Enter>", lambda e: btn_hide.configure(fg="#E5E7EB"))
+        btn_hide.bind("<Leave>", lambda e: btn_hide.configure(fg="#9CA3AF"))
 
         btn_exit = tk.Label(
             footer,
             text="Exit App",
             font=("Segoe UI", 8, "underline"),
             fg="#9CA3AF",
-            bg="#181820",
+            bg="#181822",
             cursor="hand2",
         )
         btn_exit.pack(side="right")
@@ -587,26 +599,67 @@ class ControlWindow(tk.Toplevel):
         else:
             self.lbl_status.configure(text="OFF", fg="#9CA3AF")
             self.lbl_substatus.configure(text="All processes stopped", fg="#6B7280")
-            self.card.configure(highlightbackground="#363644")
+            self.card.configure(highlightbackground="#363648")
 
     def show_window(self):
-        wa = RECT()
-        user32.SystemParametersInfoW(SPI_GETWORKAREA, 0, ctypes.byref(wa), 0)
+        pt = POINT()
+        user32.GetCursorPos(ctypes.byref(pt))
 
-        # Bottom right placement
-        x = wa.right - self.width - 16
-        y = wa.bottom - self.height - 16
+        # Detect the exact monitor where the mouse/tray icon is located
+        hmon = user32.MonitorFromPoint(pt, 2)  # MONITOR_DEFAULTTONEAREST = 2
+        mi = MONITORINFO()
+        mi.cbSize = ctypes.sizeof(MONITORINFO)
+        user32.GetMonitorInfoW(hmon, ctypes.byref(mi))
+
+        work = mi.rcWork
+        # Position in bottom-right corner of that monitor, 16px from right edge, 12px above taskbar
+        x = work.right - self.width - 16
+        y = work.bottom - self.height - 12
+
+        # If taskbar is at top of screen:
+        if pt.y < (work.top + work.bottom) // 2:
+            y = work.top + 12
 
         self.geometry(f"{self.width}x{self.height}+{x}+{y}")
         self.update_state(self.manager.is_running())
         self.deiconify()
         self.lift()
         self.attributes("-topmost", True)
-        self.after(300, lambda: self.attributes("-topmost", False))
         self.focus_force()
+
+        # Start dismissal listener with grace period
+        self.opened_at = time.monotonic()
+        self._poll_click_outside()
 
     def hide(self):
         self.withdraw()
+
+    def toggle_window(self):
+        if self.winfo_viewable():
+            self.hide()
+        else:
+            self.show_window()
+
+    def _poll_click_outside(self):
+        if not self.winfo_viewable():
+            return
+
+        # 350ms grace period after opening so initial click is never misinterpreted
+        if time.monotonic() - self.opened_at > 0.35:
+            if user32.GetAsyncKeyState(0x01) & 0x8000:
+                pt = POINT()
+                user32.GetCursorPos(ctypes.byref(pt))
+                wx = self.winfo_x()
+                wy = self.winfo_y()
+                ww = self.winfo_width()
+                wh = self.winfo_height()
+
+                # If click occurred outside the flyout window
+                if not (wx <= pt.x <= wx + ww and wy <= pt.y <= wy + wh):
+                    self.hide()
+                    return
+
+        self.after(60, self._poll_click_outside)
 
     def _exit_app(self):
         self.hide()
@@ -654,7 +707,7 @@ class ExtendScreenTrayApp:
         self.tray.run_detached()
 
     def _on_tray_click(self, icon=None, item=None):
-        self.root.after(0, self.control_win.show_window)
+        self.root.after(0, self.control_win.toggle_window)
 
     def _tray_toggle_service(self, icon=None, item=None):
         def _toggle():
