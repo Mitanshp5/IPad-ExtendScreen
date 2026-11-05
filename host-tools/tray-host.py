@@ -336,9 +336,9 @@ class ExtendServiceManager:
 
         cmd = [sys.executable, "-u", str(HOST_SCRIPT), "--parent-pid", str(os.getpid())]
         if mode == "cable":
-            cmd.extend(["--cable", "--extend", "--fps", str(fps)])
+            cmd.extend(["--cable", "--extend", "--fps", str(fps), "--quality", "5"])
         else:
-            cmd.extend(["--extend", "--fps", str(fps)])
+            cmd.extend(["--extend", "--fps", str(fps), "--quality", "7"])
 
         try:
             with open(LOG_FILE, "a", encoding="utf-8") as log_out:

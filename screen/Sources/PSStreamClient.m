@@ -177,8 +177,11 @@ static const NSUInteger PSMaximumBufferedBytes = 8 * 1024 * 1024;
     static const uint8_t eoiBytes[2] = {0xFF, 0xD9};
     NSData *soi = [NSData dataWithBytes:soiBytes length:2];
     NSData *eoi = [NSData dataWithBytes:eoiBytes length:2];
+    NSData *latestFrame = nil;
+    NSUInteger latestSequence = 0;
+
     while (!self.stopped) {
-        if (self.buffer.length < 2) return;
+        if (self.buffer.length < 2) break;
         // Find the next JPEG start marker. Any multipart boundary, headers or
         // leftover separator bytes before it are discarded.
         NSRange start = [self.buffer rangeOfData:soi options:0
@@ -187,30 +190,33 @@ static const NSUInteger PSMaximumBufferedBytes = 8 * 1024 * 1024;
             if (self.buffer.length > PSMaximumHeaderBytes) {
                 [self failWithMessage:@"The stream did not contain a JPEG frame." status:self.httpStatus];
             }
-            return;
+            break;
         }
         if (start.location > 0) {
             [self.buffer replaceBytesInRange:NSMakeRange(0, start.location)
                                    withBytes:NULL length:0];
         }
-        if (self.buffer.length < 4) return;
+        if (self.buffer.length < 4) break;
         NSRange end = [self.buffer rangeOfData:eoi options:0
                                          range:NSMakeRange(2, self.buffer.length - 2)];
         if (end.location == NSNotFound) {
             if (self.buffer.length > PSMaximumFrameBytes) {
                 [self failWithMessage:@"The stream frame was too large." status:self.httpStatus];
             }
-            return;
+            break;
         }
         NSUInteger frameLength = end.location + end.length;
-        NSData *jpeg = [self.buffer subdataWithRange:NSMakeRange(0, frameLength)];
+        latestFrame = [self.buffer subdataWithRange:NSMakeRange(0, frameLength)];
         [self.buffer replaceBytesInRange:NSMakeRange(0, frameLength)
                                withBytes:NULL length:0];
         self.frameCounter++;
+        latestSequence = self.frameCounter;
+    }
+
+    if (latestFrame && !self.stopped) {
         PSStreamFrameHandler handler = self.frameHandler;
         if (handler) {
-            NSUInteger sequence = self.frameCounter;
-            dispatch_async(dispatch_get_main_queue(), ^{ handler(jpeg, sequence); });
+            dispatch_async(dispatch_get_main_queue(), ^{ handler(latestFrame, latestSequence); });
         }
     }
 }

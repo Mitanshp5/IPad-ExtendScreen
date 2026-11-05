@@ -6,6 +6,7 @@
 #import "PSCableServer.h"
 #import "PSKeychainStore.h"
 #import "PSScreenSettings.h"
+#import "PSTurboDecoder.h"
 #import <ImageIO/ImageIO.h>
 #import <QuartzCore/QuartzCore.h>
 
@@ -17,6 +18,8 @@ static const CGFloat PSChromeHotZoneHeight = 140.0;
 
 @interface PSScreenViewController () <UIGestureRecognizerDelegate, PSCableServerDelegate>
 @property (nonatomic, strong) UIImageView *imageView;
+@property (nonatomic, strong) PSTurboDecoder *turboDecoder;
+@property (nonatomic) CGSize lastFrameSize;
 @property (nonatomic, strong) UILabel *statusLabel;
 @property (nonatomic, strong) UIButton *settingsButton;
 @property (nonatomic, strong) UIButton *keyboardButton;
@@ -79,6 +82,7 @@ static const CGFloat PSChromeHotZoneHeight = 140.0;
 
 - (void)viewDidLoad {
     [super viewDidLoad];
+    self.turboDecoder = [[PSTurboDecoder alloc] initWithPoolSize:4];
     self.view.backgroundColor = [UIColor blackColor];
     self.view.multipleTouchEnabled = YES;
     self.imageView = [[UIImageView alloc] initWithFrame:self.view.bounds];
@@ -402,24 +406,22 @@ static const CGFloat PSChromeHotZoneHeight = 140.0;
     __weak PSScreenViewController *weakSelf = self;
     dispatch_async(self.decodeQueue, ^{
         @autoreleasepool {
-            UIImage *image = nil;
-            CGImageSourceRef source = CGImageSourceCreateWithData((__bridge CFDataRef)jpeg,
-                (__bridge CFDictionaryRef)@{(__bridge id)kCGImageSourceShouldCache: @NO});
-            if (source) {
-                CGImageRef cgImage = CGImageSourceCreateImageAtIndex(source, 0, NULL);
-                if (cgImage) {
-                    image = [UIImage imageWithCGImage:cgImage];
-                    CGImageRelease(cgImage);
-                }
-                CFRelease(source);
-            }
+            CGImageRef cgImage = [weakSelf.turboDecoder decode:jpeg];
             dispatch_async(dispatch_get_main_queue(), ^{
                 PSScreenViewController *controller = weakSelf;
-                if (!controller) return;
-                if (controller.acceptFrames && image) {
-                    controller.imageView.image = image;
+                if (!controller) {
+                    if (cgImage) CGImageRelease(cgImage);
+                    return;
+                }
+                if (controller.acceptFrames && cgImage) {
+                    controller.lastFrameSize = CGSizeMake((CGFloat)CGImageGetWidth(cgImage), (CGFloat)CGImageGetHeight(cgImage));
+                    [CATransaction begin];
+                    [CATransaction setDisableActions:YES];
+                    controller.imageView.layer.contents = (__bridge id)cgImage;
+                    [CATransaction commit];
                     controller.framesThisSecond++;
                 }
+                if (cgImage) CGImageRelease(cgImage);
                 controller.decoding = NO;
                 NSData *pending = controller.pendingFrame;
                 controller.pendingFrame = nil;
@@ -430,6 +432,9 @@ static const CGFloat PSChromeHotZoneHeight = 140.0;
 }
 
 - (CGSize)displayedImageSize {
+    if (self.lastFrameSize.width > 0 && self.lastFrameSize.height > 0) {
+        return self.lastFrameSize;
+    }
     CGSize size = self.imageView.image.size;
     if (size.width < 1 || size.height < 1)
         size = CGSizeMake((CGFloat)PSDefaultStreamWidth, (CGFloat)PSDefaultStreamHeight);

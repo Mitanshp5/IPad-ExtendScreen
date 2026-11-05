@@ -1583,6 +1583,10 @@ class ScreenRequestHandler(BaseHTTPRequestHandler):
         headers_sent = False
         registered = False
         try:
+            try:
+                self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            except OSError:
+                pass
             # Prefer the host PC configured FPS (from the tray controller / CLI),
             # preventing legacy client queries (e.g. ?fps=12) from throttling the stream.
             fps = self.host.config.fps if self.host.config.fps >= 5 else 30
@@ -1643,9 +1647,7 @@ class ScreenRequestHandler(BaseHTTPRequestHandler):
             b"Content-Length: " + str(len(frame)).encode("ascii") + b"\r\n"
             b"X-Sequence: " + str(sequence).encode("ascii") + b"\r\n\r\n"
         )
-        self.wfile.write(header)
-        self.wfile.write(frame)
-        self.wfile.write(b"\r\n")
+        self.wfile.write(header + frame + b"\r\n")
         self.wfile.flush()
 
 
