@@ -1767,9 +1767,24 @@ def main(argv: Optional[list[str]] = None) -> int:
     display_host = bind
     if bind in {"0.0.0.0", "::"}:
         display_host = detect_lan_ip()
-    print(f"ExtendScreen host {APP_VERSION}")
-    print(f"  URL       : http://{display_host}:{server.server_port}")
-    print(f"  Pair code : {host.pairing.code}   (valid {PAIRING_MINUTES} minutes)")
+    print(f"ExtendScreen host {APP_VERSION}", flush=True)
+    print(f"  URL       : http://{display_host}:{server.server_port}", flush=True)
+    print(f"  Pair code : {host.pairing.code}   (valid {PAIRING_MINUTES} minutes)", flush=True)
+
+    session_file = ROOT / "host-tools" / "session.json"
+    try:
+        session_data = {
+            "mode": "wifi",
+            "url": f"http://{display_host}:{server.server_port}",
+            "pair_code": host.pairing.code,
+            "expires": host.pairing.expires,
+            "port": server.server_port,
+            "host": display_host,
+            "started_at": time.time(),
+        }
+        session_file.write_text(json.dumps(session_data, indent=2), encoding="utf-8")
+    except Exception:
+        pass
     if host.region is not None:
         print(f"  Capture   : {host.region.width}x{host.region.height} at "
               f"({host.region.x},{host.region.y}) -> {config.width}x{config.height} @ {config.fps} fps")
@@ -1790,6 +1805,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         server.shutdown()
         server.server_close()
         host.shutdown_display()
+        try:
+            if session_file.exists():
+                session_file.unlink()
+        except Exception:
+            pass
     return 0
 
 

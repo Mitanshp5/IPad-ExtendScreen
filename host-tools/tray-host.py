@@ -13,8 +13,10 @@ from __future__ import annotations
 
 import ctypes
 from ctypes import wintypes
+import json
 import os
 import pathlib
+import socket
 import subprocess
 import sys
 import threading
@@ -174,6 +176,21 @@ def ensure_tray_icons():
 # Display Switching & Job Management Helpers
 # =====================================================================
 
+SESSION_FILE = ROOT_DIR / "host-tools" / "session.json"
+
+
+def detect_lan_ip() -> str:
+    """Best-effort local IPv4 address."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("192.0.2.1", 9))
+        return s.getsockname()[0]
+    except Exception:
+        return "127.0.0.1"
+    finally:
+        s.close()
+
+
 def set_display_internal() -> bool:
     """Instantly switches Windows display configuration to single-screen (internal)."""
     try:
@@ -272,14 +289,30 @@ for sig in (getattr(signal, "SIGINT", None), getattr(signal, "SIGTERM", None), g
 class ExtendServiceManager:
     """Manages the background ExtendScreen host processes and display switching."""
 
-    def __init__(self, on_status_change=None) -> None:
+    def __init__(self, on_status_change=None, on_pairing_update=None) -> None:
         self.proc: Optional[subprocess.Popen] = None
         self.mode = "cable"  # "cable" or "wifi"
         self.fps = 45
+        self.pair_code: Optional[str] = None
+        self.url: Optional[str] = None
         self.on_status_change = on_status_change
+        self.on_pairing_update = on_pairing_update
         self.monitor_thread: Optional[threading.Thread] = None
         self.stop_requested = False
         self.job = setup_process_job()
+        self._load_cached_session()
+
+    def _load_cached_session(self):
+        if SESSION_FILE.exists():
+            try:
+                import json
+                data = json.loads(SESSION_FILE.read_text(encoding="utf-8"))
+                if data.get("pair_code"):
+                    self.pair_code = str(data["pair_code"])
+                if data.get("url"):
+                    self.url = str(data["url"])
+            except Exception:
+                pass
 
     def is_running(self) -> bool:
         if self.proc is not None:
@@ -292,11 +325,16 @@ class ExtendServiceManager:
         self.stop_requested = False
         self.mode = mode
         self.fps = fps
+        self.pair_code = None
+        self.url = None
+
+        if mode == "wifi" and self.on_pairing_update:
+            self.on_pairing_update(None, None)
 
         # Kill any prior orphan processes before starting
         self.kill_all(reset_display=False)
 
-        cmd = [sys.executable, str(HOST_SCRIPT), "--parent-pid", str(os.getpid())]
+        cmd = [sys.executable, "-u", str(HOST_SCRIPT), "--parent-pid", str(os.getpid())]
         if mode == "cable":
             cmd.extend(["--cable", "--extend", "--fps", str(fps)])
         else:
@@ -326,6 +364,27 @@ class ExtendServiceManager:
             self.monitor_thread = threading.Thread(target=self._monitor_process, daemon=True)
             self.monitor_thread.start()
 
+            # Fast session watcher for instant pairing code display
+            if mode == "wifi":
+                def _check_session():
+                    for _ in range(25):
+                        if self.pair_code or not self.is_running():
+                            break
+                        if SESSION_FILE.exists():
+                            try:
+                                import json
+                                data = json.loads(SESSION_FILE.read_text(encoding="utf-8"))
+                                if data.get("pair_code"):
+                                    self.pair_code = str(data["pair_code"])
+                                    self.url = str(data.get("url") or f"http://{detect_lan_ip()}:8644")
+                                    if self.on_pairing_update:
+                                        self.on_pairing_update(self.pair_code, self.url)
+                                    break
+                            except Exception:
+                                pass
+                        time.sleep(0.12)
+                threading.Thread(target=_check_session, daemon=True, name="FastSessionCheck").start()
+
             if self.on_status_change:
                 self.on_status_change(True)
             return True
@@ -344,17 +403,62 @@ class ExtendServiceManager:
                 for line in self.proc.stdout:
                     log_out.write(line)
                     log_out.flush()
+
+                    # Real-time extraction of pairing code and URL
+                    updated = False
+                    if "URL       :" in line:
+                        self.url = line.split("URL       :", 1)[1].strip()
+                        updated = True
+                    elif "Pair code :" in line:
+                        code_part = line.split("Pair code :", 1)[1].strip()
+                        self.pair_code = code_part.split()[0].strip()
+                        updated = True
+
+                    # Also check session file fallback
+                    if not self.pair_code and SESSION_FILE.exists():
+                        try:
+                            import json
+                            data = json.loads(SESSION_FILE.read_text(encoding="utf-8"))
+                            if data.get("pair_code"):
+                                self.pair_code = str(data["pair_code"])
+                                updated = True
+                            if data.get("url"):
+                                self.url = str(data["url"])
+                                updated = True
+                        except Exception:
+                            pass
+
+                    if updated and self.on_pairing_update:
+                        self.on_pairing_update(self.pair_code, self.url)
         except Exception:
             pass
         finally:
             if not self.stop_requested:
                 self.proc = None
+                self.pair_code = None
+                self.url = None
                 if self.on_status_change:
                     self.on_status_change(False)
+                if self.on_pairing_update:
+                    self.on_pairing_update(None, None)
 
     def kill_all(self, reset_display: bool = True) -> None:
         """Kill all host processes (screen-host.py, ffmpeg) and reset display."""
         self.stop_requested = True
+        self.pair_code = None
+        self.url = None
+
+        try:
+            if SESSION_FILE.exists():
+                SESSION_FILE.unlink()
+        except Exception:
+            pass
+
+        if self.on_pairing_update:
+            try:
+                self.on_pairing_update(None, None)
+            except Exception:
+                pass
 
         # 1. Kill tracked child process tree
         if self.proc is not None:
@@ -402,6 +506,8 @@ class ExtendServiceManager:
 
         if self.on_status_change:
             self.on_status_change(False)
+        if self.on_pairing_update:
+            self.on_pairing_update(None, None)
 
 
 # =====================================================================
@@ -518,6 +624,7 @@ class ControlWindow(tk.Toplevel):
 
         self.fps_var = tk.StringVar(value="45")
         self.fps_buttons = {}
+        self.mode_tiles = {}
 
         self.withdraw()
 
@@ -623,14 +730,14 @@ class ControlWindow(tk.Toplevel):
         self.toggle = SmoothToggle(self.card, width=54, height=28, command=self._on_toggle, bg="#22222E")
         self.toggle.pack(side="right", padx=(8, 0))
 
-        # Connection Mode Radio Group
+        # Connection Mode Box with High-Contrast Interactive Tiles
         mode_box = tk.LabelFrame(
             inner,
             text=" Connection Mode ",
             font=("Segoe UI", 8, "bold"),
             fg="#9CA3AF",
             bg="#181822",
-            padx=12,
+            padx=10,
             pady=8,
             highlightthickness=1,
             highlightbackground="#2C2C3C",
@@ -639,64 +746,182 @@ class ControlWindow(tk.Toplevel):
 
         self.mode_var = tk.StringVar(value="cable")
 
-        rb_cable = tk.Radiobutton(
-            mode_box,
-            text="⚡ USB Cable (Recommended)",
-            variable=self.mode_var,
-            value="cable",
-            font=("Segoe UI", 9),
+        mode_data = [
+            ("cable", "⚡ USB Cable (Recommended)", "Direct USB tethering with ultra-low latency"),
+            ("wifi", "📶 Wi-Fi Network Streaming", "Wireless streaming over local Wi-Fi network"),
+        ]
+
+        for m_val, m_title, m_desc in mode_data:
+            tile = tk.Frame(
+                mode_box,
+                bg="#1E1E2A",
+                padx=10,
+                pady=7,
+                highlightthickness=1,
+                highlightbackground="#2E2E3E",
+                cursor="hand2",
+            )
+            tile.pack(fill="x", pady=2)
+
+            canvas_radio = tk.Canvas(
+                tile,
+                width=18,
+                height=18,
+                bg="#1E1E2A",
+                highlightthickness=0,
+                cursor="hand2",
+            )
+            canvas_radio.pack(side="left", padx=(0, 10))
+
+            text_frame = tk.Frame(tile, bg="#1E1E2A", cursor="hand2")
+            text_frame.pack(side="left", fill="both", expand=True)
+
+            lbl_m_title = tk.Label(
+                text_frame,
+                text=m_title,
+                font=("Segoe UI", 8, "bold"),
+                fg="#CBD5E1",
+                bg="#1E1E2A",
+                anchor="w",
+                cursor="hand2",
+            )
+            lbl_m_title.pack(fill="x")
+
+            lbl_m_desc = tk.Label(
+                text_frame,
+                text=m_desc,
+                font=("Segoe UI", 7),
+                fg="#6B7280",
+                bg="#1E1E2A",
+                anchor="w",
+                cursor="hand2",
+            )
+            lbl_m_desc.pack(fill="x")
+
+            self.mode_tiles[m_val] = (tile, canvas_radio, text_frame, lbl_m_title, lbl_m_desc)
+
+            for w in (tile, canvas_radio, text_frame, lbl_m_title, lbl_m_desc):
+                w.bind("<Button-1>", lambda e, val=m_val: self._select_mode(val))
+
+            def _bind_hover(t=tile, v=m_val):
+                def _enter(e):
+                    if self.mode_var.get() != v:
+                        t.configure(highlightbackground="#475569", bg="#252535")
+                def _leave(e):
+                    if self.mode_var.get() != v:
+                        t.configure(highlightbackground="#2E2E3E", bg="#1E1E2A")
+                return _enter, _leave
+
+            _ent, _lev = _bind_hover()
+            for w in (tile, canvas_radio, text_frame, lbl_m_title, lbl_m_desc):
+                w.bind("<Enter>", _ent)
+                w.bind("<Leave>", _lev)
+
+        # Wi-Fi Pairing Info Card (Shown when Wi-Fi mode is active)
+        self.pair_box = tk.Frame(
+            inner,
+            bg="#162536",
+            padx=12,
+            pady=10,
+            highlightthickness=1,
+            highlightbackground="#0284C7",
+        )
+
+        pair_header = tk.Frame(self.pair_box, bg="#162536")
+        pair_header.pack(fill="x", pady=(0, 6))
+
+        tk.Label(
+            pair_header,
+            text="📶 WI-FI PAIRING CODE",
+            font=("Segoe UI", 8, "bold"),
+            fg="#38BDF8",
+            bg="#162536",
+        ).pack(side="left")
+
+        self.lbl_pair_status = tk.Label(
+            pair_header,
+            text="Turn ON to pair",
+            font=("Segoe UI", 7, "bold"),
+            fg="#94A3B8",
+            bg="#162536",
+        )
+        self.lbl_pair_status.pack(side="right")
+
+        # Code display box
+        code_card = tk.Frame(
+            self.pair_box,
+            bg="#0B132B",
+            padx=10,
+            pady=6,
+            highlightthickness=1,
+            highlightbackground="#1E293B",
+        )
+        code_card.pack(fill="x", pady=(0, 6))
+
+        self.lbl_pair_code = tk.Label(
+            code_card,
+            text="-- --  -- --",
+            font=("Consolas", 15, "bold"),
+            fg="#64748B",
+            bg="#0B132B",
+        )
+        self.lbl_pair_code.pack(side="left", expand=True)
+
+        self.btn_copy_code = tk.Label(
+            code_card,
+            text="Copy Code",
+            font=("Segoe UI", 8, "bold"),
             fg="#FFFFFF",
-            bg="#181822",
-            selectcolor="#181822",
-            activebackground="#181822",
-            activeforeground="#38BDF8",
-            command=self._on_mode_change,
+            bg="#0284C7",
+            padx=8,
+            pady=4,
             cursor="hand2",
         )
-        rb_cable.pack(anchor="w")
+        self.btn_copy_code.pack(side="right")
+        self.btn_copy_code.bind("<Button-1>", lambda e: self._copy_code())
 
-        lbl_cable_tip = tk.Label(
-            mode_box,
-            text="     Direct USB tethering with ultra-low latency",
-            font=("Segoe UI", 7),
-            fg="#6B7280",
-            bg="#181822",
+        # URL row
+        url_frame = tk.Frame(self.pair_box, bg="#162536")
+        url_frame.pack(fill="x", pady=(0, 4))
+
+        self.lbl_pair_url = tk.Label(
+            url_frame,
+            text=f"Host: http://{detect_lan_ip()}:8644",
+            font=("Segoe UI", 8),
+            fg="#CBD5E1",
+            bg="#162536",
         )
-        lbl_cable_tip.pack(anchor="w")
+        self.lbl_pair_url.pack(side="left")
 
-        rb_wifi = tk.Radiobutton(
-            mode_box,
-            text="📶 Wi-Fi (HTTP Network Streaming)",
-            variable=self.mode_var,
-            value="wifi",
-            font=("Segoe UI", 9),
-            fg="#FFFFFF",
-            bg="#181822",
-            selectcolor="#181822",
-            activebackground="#181822",
-            activeforeground="#38BDF8",
-            command=self._on_mode_change,
+        self.btn_copy_url = tk.Label(
+            url_frame,
+            text="Copy URL",
+            font=("Segoe UI", 8, "underline"),
+            fg="#38BDF8",
+            bg="#162536",
             cursor="hand2",
         )
-        rb_wifi.pack(anchor="w", pady=(4, 0))
+        self.btn_copy_url.pack(side="right")
+        self.btn_copy_url.bind("<Button-1>", lambda e: self._copy_url())
 
-        lbl_wifi_tip = tk.Label(
-            mode_box,
-            text="     Wireless streaming over local Wi-Fi network",
+        # Sub-hint
+        lbl_hint = tk.Label(
+            self.pair_box,
+            text="Enter this URL & code on your iPad when prompted.",
             font=("Segoe UI", 7),
-            fg="#6B7280",
-            bg="#181822",
+            fg="#94A3B8",
+            bg="#162536",
         )
-        lbl_wifi_tip.pack(anchor="w")
+        lbl_hint.pack(anchor="w")
 
         # Framerate (FPS) Control Row
-        fps_box = tk.Frame(inner, bg="#1F1F2C", padx=12, pady=8, highlightthickness=1, highlightbackground="#2C2C3C")
-        fps_box.pack(fill="x", pady=(0, 12))
+        self.fps_box = tk.Frame(inner, bg="#1F1F2C", padx=12, pady=8, highlightthickness=1, highlightbackground="#2C2C3C")
+        self.fps_box.pack(fill="x", pady=(0, 10))
 
-        lbl_fps = tk.Label(fps_box, text="Framerate:", font=("Segoe UI", 8, "bold"), fg="#D1D5DB", bg="#1F1F2C")
+        lbl_fps = tk.Label(self.fps_box, text="Framerate:", font=("Segoe UI", 8, "bold"), fg="#D1D5DB", bg="#1F1F2C")
         lbl_fps.pack(side="left", padx=(0, 8))
 
-        self.fps_btn_container = tk.Frame(fps_box, bg="#282838", padx=2, pady=2, highlightthickness=1, highlightbackground="#3A3A4A")
+        self.fps_btn_container = tk.Frame(self.fps_box, bg="#282838", padx=2, pady=2, highlightthickness=1, highlightbackground="#3A3A4A")
         self.fps_btn_container.pack(side="left")
 
         self.fps_buttons = {}
@@ -707,7 +932,7 @@ class ControlWindow(tk.Toplevel):
             self.fps_buttons[val] = b
 
         self.entry_fps = tk.Entry(
-            fps_box,
+            self.fps_box,
             textvariable=self.fps_var,
             font=("Segoe UI", 8, "bold"),
             width=3,
@@ -723,32 +948,32 @@ class ControlWindow(tk.Toplevel):
         self.entry_fps.bind("<Return>", lambda e: self._on_custom_fps())
         self.entry_fps.bind("<FocusOut>", lambda e: self._on_custom_fps())
 
-        lbl_fps_unit = tk.Label(fps_box, text="FPS (5-60)", font=("Segoe UI", 7), fg="#6B7280", bg="#1F1F2C")
+        lbl_fps_unit = tk.Label(self.fps_box, text="FPS (5-60)", font=("Segoe UI", 7), fg="#6B7280", bg="#1F1F2C")
         lbl_fps_unit.pack(side="left", padx=(4, 0))
 
         self._update_fps_buttons()
 
         # Status / Guidance Box
-        info_box = tk.Frame(inner, bg="#1F1F2C", padx=10, pady=8, highlightthickness=1, highlightbackground="#2A2A38")
-        info_box.pack(fill="x", pady=(0, 14))
+        self.info_box = tk.Frame(inner, bg="#1F1F2C", padx=10, pady=8, highlightthickness=1, highlightbackground="#2A2A38")
+        self.info_box.pack(fill="x", pady=(0, 12))
 
-        lbl_info1 = tk.Label(
-            info_box,
+        self.lbl_info1 = tk.Label(
+            self.info_box,
             text="💡 Switch ON to extend desktop to your iPad.",
             font=("Segoe UI", 8),
             fg="#8E8EA0",
             bg="#1F1F2C",
         )
-        lbl_info1.pack(anchor="w")
+        self.lbl_info1.pack(anchor="w")
 
-        lbl_info2 = tk.Label(
-            info_box,
+        self.lbl_info2 = tk.Label(
+            self.info_box,
             text="   Switch OFF to disconnect and restore internal display.",
             font=("Segoe UI", 8),
             fg="#6B7280",
             bg="#1F1F2C",
         )
-        lbl_info2.pack(anchor="w")
+        self.lbl_info2.pack(anchor="w")
 
         # Footer
         footer = tk.Frame(inner, bg="#181822")
@@ -780,9 +1005,11 @@ class ControlWindow(tk.Toplevel):
         btn_exit.bind("<Enter>", lambda e: btn_exit.configure(fg="#EF4444"))
         btn_exit.bind("<Leave>", lambda e: btn_exit.configure(fg="#9CA3AF"))
 
+        self._update_mode_tiles()
+        self._update_guidance()
         self.update_idletasks()
         self.width = max(370, self.winfo_reqwidth())
-        self.height = max(465, self.winfo_reqheight())
+        self.height = self.winfo_reqheight()
 
     def _start_drag(self, event):
         self._drag_x = event.x
@@ -834,6 +1061,115 @@ class ControlWindow(tk.Toplevel):
 
         threading.Thread(target=_bg, daemon=True).start()
 
+    def _select_mode(self, val: str):
+        if self.mode_var.get() == val:
+            return
+        self.mode_var.set(val)
+        self._update_mode_tiles()
+        self._update_guidance()
+        if self.manager.is_running():
+            self._on_mode_change()
+
+    def _update_mode_tiles(self):
+        cur = self.mode_var.get()
+        for m_val, (tile, canvas_radio, text_frame, lbl_m_title, lbl_m_desc) in self.mode_tiles.items():
+            canvas_radio.delete("all")
+            if m_val == cur:
+                tile.configure(bg="#162536", highlightbackground="#0284C7", highlightthickness=1)
+                canvas_radio.configure(bg="#162536")
+                text_frame.configure(bg="#162536")
+                lbl_m_title.configure(bg="#162536", fg="#FFFFFF")
+                lbl_m_desc.configure(bg="#162536", fg="#94A3B8")
+
+                # Prominent glowing radio indicator
+                canvas_radio.create_oval(2, 2, 16, 16, outline="#38BDF8", width=2, fill="#0B132B")
+                canvas_radio.create_oval(5, 5, 13, 13, outline="#38BDF8", fill="#38BDF8")
+            else:
+                tile.configure(bg="#1E1E2A", highlightbackground="#2E2E3E", highlightthickness=1)
+                canvas_radio.configure(bg="#1E1E2A")
+                text_frame.configure(bg="#1E1E2A")
+                lbl_m_title.configure(bg="#1E1E2A", fg="#CBD5E1")
+                lbl_m_desc.configure(bg="#1E1E2A", fg="#64748B")
+
+                # Clear, visible unselected ring
+                canvas_radio.create_oval(2, 2, 16, 16, outline="#94A3B8", width=1.8, fill="#181822")
+
+        if cur == "wifi":
+            self.pair_box.pack(fill="x", pady=(0, 10), before=self.fps_box)
+            if self.manager.is_running() and self.manager.pair_code:
+                self._update_pairing_display(self.manager.pair_code, self.manager.url)
+            elif self.manager.is_running():
+                self._update_pairing_display(None, None, starting=True)
+            else:
+                self._update_pairing_display(None, None, starting=False)
+        else:
+            self.pair_box.pack_forget()
+
+        self._reanchor_window()
+
+    def _update_guidance(self):
+        mode = self.mode_var.get()
+        if mode == "cable":
+            self.lbl_info1.configure(text="💡 USB Cable: Connect your iPad via Lightning/USB-C.")
+            self.lbl_info2.configure(text="   No pairing required. Near-zero latency streaming.")
+        else:
+            self.lbl_info1.configure(text="📶 Wi-Fi: Connect iPad to the same Wi-Fi network.")
+            self.lbl_info2.configure(text="   Open iPad app and enter pairing code & host URL.")
+
+    def _update_pairing_display(self, code: Optional[str], url: Optional[str], starting: bool = False):
+        if url:
+            self.lbl_pair_url.configure(text=f"Host: {url}")
+        else:
+            self.lbl_pair_url.configure(text=f"Host: http://{detect_lan_ip()}:8644")
+
+        if code:
+            c_str = str(code)
+            formatted = f"{c_str[:4]}  {c_str[4:]}" if len(c_str) == 8 else c_str
+            self.lbl_pair_code.configure(text=formatted, fg="#38BDF8")
+            self.lbl_pair_status.configure(text="● Ready to Pair", fg="#34D399")
+            self.btn_copy_code.configure(text="Copy Code", bg="#0284C7", fg="#FFFFFF")
+        elif starting or (self.manager.is_running() and self.mode_var.get() == "wifi"):
+            self.lbl_pair_code.configure(text="GENERATING...", fg="#FBBF24")
+            self.lbl_pair_status.configure(text="● Starting...", fg="#FBBF24")
+            self.btn_copy_code.configure(text="Copy Code", bg="#334155", fg="#94A3B8")
+        else:
+            self.lbl_pair_code.configure(text="-- --  -- --", fg="#64748B")
+            self.lbl_pair_status.configure(text="Turn ON to pair", fg="#94A3B8")
+            self.btn_copy_code.configure(text="Copy Code", bg="#334155", fg="#94A3B8")
+
+    def _copy_code(self):
+        code = self.manager.pair_code
+        if not code:
+            return
+        self.clipboard_clear()
+        self.clipboard_append(code)
+        self.btn_copy_code.configure(text="✓ Copied!", bg="#10B981")
+        self.after(1400, lambda: self.btn_copy_code.configure(text="Copy Code", bg="#0284C7"))
+
+    def _copy_url(self):
+        url = self.manager.url or f"http://{detect_lan_ip()}:8644"
+        self.clipboard_clear()
+        self.clipboard_append(url)
+        self.btn_copy_url.configure(text="✓ Copied!", fg="#10B981")
+        self.after(1400, lambda: self.btn_copy_url.configure(text="Copy URL", fg="#38BDF8"))
+
+    def _reanchor_window(self):
+        if not self.winfo_viewable():
+            return
+        self.update_idletasks()
+        self.height = self.winfo_reqheight()
+        self.width = max(370, self.winfo_reqwidth())
+        x = self.winfo_x()
+        pt = POINT()
+        user32.GetCursorPos(ctypes.byref(pt))
+        hmon = user32.MonitorFromPoint(pt, 2)
+        mi = MONITORINFO()
+        mi.cbSize = ctypes.sizeof(MONITORINFO)
+        user32.GetMonitorInfoW(hmon, ctypes.byref(mi))
+        work = mi.rcWork
+        y = work.bottom - self.height - 14
+        self.geometry(f"{self.width}x{self.height}+{x}+{y}")
+
     def _on_toggle(self, is_on: bool):
         mode = self.mode_var.get()
         fps = self.get_fps()
@@ -849,6 +1185,8 @@ class ControlWindow(tk.Toplevel):
             self.lbl_status.configure(bg="#1A2234")
             self.lbl_substatus.configure(bg="#1A2234")
             self.toggle.configure(bg="#1A2234")
+            if mode == "wifi":
+                self._update_pairing_display(None, None, starting=True)
         else:
             self.lbl_status.configure(text="STOPPING...", fg="#9CA3AF")
             self.lbl_substatus.configure(text="Stopping all services...", fg="#6B7280")
@@ -858,6 +1196,8 @@ class ControlWindow(tk.Toplevel):
             self.lbl_status.configure(bg="#22222E")
             self.lbl_substatus.configure(bg="#22222E")
             self.toggle.configure(bg="#22222E")
+            if mode == "wifi":
+                self._update_pairing_display(None, None, starting=False)
 
         # 2. Heavy process operations run asynchronously in background thread
         def _bg_action():
@@ -877,6 +1217,8 @@ class ControlWindow(tk.Toplevel):
             self.lbl_status.configure(text="ON", fg="#38BDF8")
             self.lbl_substatus.configure(text=f"Active ({mode_name}) • {fps} FPS • Display extended", fg="#38BDF8")
             self.card.configure(highlightbackground="#0284C7", bg="#1A2234")
+            if self.mode_var.get() == "wifi":
+                self._update_pairing_display(self.manager.pair_code, self.manager.url)
         else:
             self.toggle.set_state(False)
             self.update_state(False)
@@ -884,6 +1226,8 @@ class ControlWindow(tk.Toplevel):
 
     def _on_kill_finished(self):
         self.update_state(False)
+        if self.mode_var.get() == "wifi":
+            self._update_pairing_display(None, None)
 
     def _on_mode_change(self):
         if self.manager.is_running():
@@ -892,6 +1236,8 @@ class ControlWindow(tk.Toplevel):
             mode_name = "USB Cable" if mode == "cable" else "Wi-Fi"
             self.lbl_status.configure(text="SWITCHING...", fg="#38BDF8")
             self.lbl_substatus.configure(text=f"Switching to {mode_name} ({fps} FPS)...", fg="#38BDF8")
+            if mode == "wifi":
+                self._update_pairing_display(None, None, starting=True)
 
             def _bg_restart():
                 self.manager.start(mode, fps=fps)
@@ -912,6 +1258,8 @@ class ControlWindow(tk.Toplevel):
             self.lbl_status.configure(bg="#1A2234")
             self.lbl_substatus.configure(bg="#1A2234")
             self.toggle.configure(bg="#1A2234")
+            if self.mode_var.get() == "wifi":
+                self._update_pairing_display(self.manager.pair_code, self.manager.url)
         else:
             self.lbl_status.configure(text="OFF", fg="#9CA3AF")
             self.lbl_substatus.configure(text="All processes stopped", fg="#6B7280")
@@ -921,6 +1269,8 @@ class ControlWindow(tk.Toplevel):
             self.lbl_status.configure(bg="#22222E")
             self.lbl_substatus.configure(bg="#22222E")
             self.toggle.configure(bg="#22222E")
+            if self.mode_var.get() == "wifi":
+                self._update_pairing_display(None, None)
 
     def show_window(self):
         pt = POINT()
@@ -935,9 +1285,11 @@ class ControlWindow(tk.Toplevel):
         work = mi.rcWork
 
         # Recalculate dimensions dynamically
+        self._update_mode_tiles()
+        self._update_guidance()
         self.update_idletasks()
         self.width = max(370, self.winfo_reqwidth())
-        self.height = max(465, self.winfo_reqheight())
+        self.height = self.winfo_reqheight()
 
         # Horizontal positioning:
         # If clicked in tray area (right side of monitor), center relative to click
@@ -1038,7 +1390,10 @@ class ExtendScreenTrayApp:
         self.img_off = Image.open(TRAY_OFF_PNG)
         self.img_on = Image.open(TRAY_ON_PNG)
 
-        self.manager = ExtendServiceManager(on_status_change=self._on_service_status_change)
+        self.manager = ExtendServiceManager(
+            on_status_change=self._on_service_status_change,
+            on_pairing_update=self._on_pairing_update,
+        )
         self.control_win = ControlWindow(self.root, self.manager, on_exit=self.quit_app)
 
         # Setup Pystray Tray Icon
@@ -1072,6 +1427,11 @@ class ExtendScreenTrayApp:
         def _update():
             self._update_tray_state(is_running)
             self.control_win.update_state(is_running)
+        self.root.after(0, _update)
+
+    def _on_pairing_update(self, code: Optional[str], url: Optional[str]):
+        def _update():
+            self.control_win._update_pairing_display(code, url)
         self.root.after(0, _update)
 
     def _update_tray_state(self, is_running: bool):
