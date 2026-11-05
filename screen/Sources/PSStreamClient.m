@@ -54,7 +54,7 @@ static const NSUInteger PSMaximumBufferedBytes = 8 * 1024 * 1024;
         return;
     }
     parts.path = @"/stream";
-    parts.query = [NSString stringWithFormat:@"fps=%lu", (unsigned long)MAX((NSUInteger)5, MIN((NSUInteger)15, fps))];
+    parts.query = [NSString stringWithFormat:@"fps=%lu", (unsigned long)MAX((NSUInteger)5, MIN((NSUInteger)60, fps))];
     parts.fragment = nil;
     NSURL *url = parts.URL;
     if (!url) {

@@ -129,9 +129,9 @@
     self.cableHelp = [self label:@"USB cable mode needs no password. Connect the cable, then run start-cable-host.cmd on the PC. The PC reaches the app through Apple usbmuxd (Apple Mobile Device Support or libimobiledevice). The listener stays on 127.0.0.1:8765 inside the iPad."];
 
     self.fpsTitle = [self label:@"Stream rate"];
-    self.fpsControl = [[UISegmentedControl alloc] initWithItems:@[@"8 fps", @"10 fps", @"12 fps"]];
+    self.fpsControl = [[UISegmentedControl alloc] initWithItems:@[@"15 fps", @"30 fps", @"45 fps", @"60 fps"]];
     NSInteger fps = [[self storedObjectForKey:PSFPSKey bundled:bundled] integerValue];
-    self.fpsControl.selectedSegmentIndex = fps == 8 ? 0 : (fps == 10 ? 1 : 2);
+    self.fpsControl.selectedSegmentIndex = fps == 15 ? 0 : (fps == 45 ? 2 : (fps == 60 ? 3 : 1));
     [self.scroll addSubview:self.fpsControl];
 
     self.inputTitle = [self label:@"Forward touch and keyboard to the PC"];
@@ -221,8 +221,9 @@
 
     [defaults setObject:server ?: @"" forKey:PSServerURLKey];
     [defaults setInteger:mode forKey:PSModeKey];
-    NSInteger fps = self.fpsControl.selectedSegmentIndex == 0 ? 8 :
-                    (self.fpsControl.selectedSegmentIndex == 1 ? 10 : 12);
+    NSInteger fps = self.fpsControl.selectedSegmentIndex == 0 ? 15 :
+                    (self.fpsControl.selectedSegmentIndex == 2 ? 45 :
+                    (self.fpsControl.selectedSegmentIndex == 3 ? 60 : 30));
     [defaults setInteger:fps forKey:PSFPSKey];
     [defaults setBool:self.inputSwitch.on forKey:PSInputKey];
     [defaults setBool:self.showFPSSwitch.on forKey:PSShowFPSKey];

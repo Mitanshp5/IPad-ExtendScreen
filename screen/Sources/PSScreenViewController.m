@@ -244,7 +244,7 @@ static const CGFloat PSChromeHotZoneHeight = 140.0;
     NSString *server = [defaults stringForKey:PSServerURLKey];
     NSInteger mode = [defaults integerForKey:PSModeKey] == PSModeCable ? PSModeCable : PSModeWiFi;
     NSInteger fps = [defaults integerForKey:PSFPSKey];
-    if (fps < 5 || fps > 15) fps = 12;
+    if (fps < 5 || fps > 60) fps = 30;
     BOOL inputEnabled = [defaults boolForKey:PSInputKey];
     BOOL showFPS = [defaults boolForKey:PSShowFPSKey];
     self.fpsLabel.hidden = !showFPS;

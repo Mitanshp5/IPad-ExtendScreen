@@ -5,7 +5,7 @@
 	<key>ExtendScreenServerURL</key>
 	<string></string>
 	<key>ExtendScreenFPS</key>
-	<integer>12</integer>
+	<integer>30</integer>
 	<key>ExtendScreenInputEnabled</key>
 	<true/>
 	<key>ExtendScreenShowFPS</key>

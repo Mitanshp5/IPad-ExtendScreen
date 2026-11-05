@@ -1278,6 +1278,7 @@ class ScreenHost:
         self.running = True
         self._stream_lock = threading.Lock()
         self._active_streams = 0
+        self._disable_timer: Optional[threading.Timer] = None
         self.display_topology = DisplayTopology(
             config.manage_display and config.monitor == "extend"
             and not config.test_pattern and config.region is None)
@@ -1300,6 +1301,9 @@ class ScreenHost:
 
     def begin_stream(self) -> None:
         with self._stream_lock:
+            if self._disable_timer is not None:
+                self._disable_timer.cancel()
+                self._disable_timer = None
             if self.region is None:
                 try:
                     if self.display_topology.enabled:
@@ -1324,12 +1328,25 @@ class ScreenHost:
         with self._stream_lock:
             self._active_streams = max(0, self._active_streams - 1)
             if self._active_streams == 0 and self.display_topology.enabled:
-                self.display_topology.disable("The iPad stream ended")
+                if self._disable_timer is not None:
+                    self._disable_timer.cancel()
+                def _do_disable():
+                    with self._stream_lock:
+                        if self._active_streams == 0 and self.display_topology.enabled:
+                            self.display_topology.disable("The iPad stream ended")
+                            self.region = None
+                self._disable_timer = threading.Timer(15.0, _do_disable)
+                self._disable_timer.daemon = True
+                self._disable_timer.start()
 
     def shutdown_display(self) -> None:
         with self._stream_lock:
+            if self._disable_timer is not None:
+                self._disable_timer.cancel()
+                self._disable_timer = None
             if self.display_topology.enabled:
                 self.display_topology.disable("The host is stopping")
+                self.region = None
 
 
 def resolve_region(config: Config) -> Region:
@@ -1566,12 +1583,15 @@ class ScreenRequestHandler(BaseHTTPRequestHandler):
         headers_sent = False
         registered = False
         try:
+            # Prefer the host PC configured FPS (from the tray controller / CLI),
+            # preventing legacy client queries (e.g. ?fps=12) from throttling the stream.
+            fps = self.host.config.fps if self.host.config.fps >= 5 else 30
             query = parse_qs(urlsplit(self.path).query)
-            requested = query.get("fps", [str(self.host.config.fps)])[0]
-            try:
-                fps = clamp(int(requested), 5, self.host.config.fps)
-            except (TypeError, ValueError):
-                fps = self.host.config.fps
+            if "fps" in query and not self.host.config.fps:
+                try:
+                    fps = clamp(int(query["fps"][0]), 5, 60)
+                except (TypeError, ValueError):
+                    pass
             try:
                 self.host.begin_stream()
                 registered = True
