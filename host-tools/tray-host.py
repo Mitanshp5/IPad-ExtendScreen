@@ -416,9 +416,11 @@ class ControlWindow(tk.Toplevel):
         self.attributes("-topmost", True)
         self.configure(bg="#121218")
         self.resizable(False, False)
-        self.width = 330
-        self.height = 280
+        self.width = 370
+        self.height = 425
         self.opened_at = 0.0
+        self._drag_x = 0
+        self._drag_y = 0
 
         self.withdraw()
 
@@ -432,38 +434,67 @@ class ControlWindow(tk.Toplevel):
         border_frame = tk.Frame(self, bg="#333342", padx=1, pady=1)
         border_frame.pack(fill="both", expand=True)
 
-        inner = tk.Frame(border_frame, bg="#181822", padx=16, pady=14)
+        inner = tk.Frame(border_frame, bg="#181822", padx=18, pady=16)
         inner.pack(fill="both", expand=True)
 
-        # Header
-        header = tk.Frame(inner, bg="#181822")
-        header.pack(fill="x", pady=(0, 10))
+        # Header (draggable)
+        header = tk.Frame(inner, bg="#181822", cursor="fleur")
+        header.pack(fill="x", pady=(0, 12))
+        header.bind("<Button-1>", self._start_drag)
+        header.bind("<B1-Motion>", self._on_drag)
+
+        title_box = tk.Frame(header, bg="#181822")
+        title_box.pack(side="left")
+        title_box.bind("<Button-1>", self._start_drag)
+        title_box.bind("<B1-Motion>", self._on_drag)
 
         if ICON_PNG.exists():
             try:
                 im = Image.open(ICON_PNG).resize((22, 22), Image.Resampling.LANCZOS)
                 self.icon_photo = ImageTk.PhotoImage(im)
-                lbl_icon = tk.Label(header, image=self.icon_photo, bg="#181822")
+                lbl_icon = tk.Label(title_box, image=self.icon_photo, bg="#181822")
                 lbl_icon.pack(side="left", padx=(0, 8))
+                lbl_icon.bind("<Button-1>", self._start_drag)
+                lbl_icon.bind("<B1-Motion>", self._on_drag)
             except Exception:
                 pass
 
+        text_box = tk.Frame(title_box, bg="#181822")
+        text_box.pack(side="left")
+        text_box.bind("<Button-1>", self._start_drag)
+        text_box.bind("<B1-Motion>", self._on_drag)
+
         lbl_title = tk.Label(
-            header,
+            text_box,
             text="ExtendScreen",
             font=("Segoe UI", 11, "bold"),
             fg="#FFFFFF",
             bg="#181822",
         )
-        lbl_title.pack(side="left")
+        lbl_title.pack(anchor="w")
+        lbl_title.bind("<Button-1>", self._start_drag)
+        lbl_title.bind("<B1-Motion>", self._on_drag)
+
+        lbl_tag = tk.Label(
+            text_box,
+            text="iPad Display Host Controller",
+            font=("Segoe UI", 7),
+            fg="#8E8EA0",
+            bg="#181822",
+        )
+        lbl_tag.pack(anchor="w")
+        lbl_tag.bind("<Button-1>", self._start_drag)
+        lbl_tag.bind("<B1-Motion>", self._on_drag)
 
         btn_min = tk.Label(
             header,
             text="✕",
-            font=("Segoe UI", 10),
+            font=("Segoe UI", 11),
             fg="#9CA3AF",
             bg="#181822",
             cursor="hand2",
+            padx=4,
+            pady=2,
         )
         btn_min.pack(side="right")
         btn_min.bind("<Button-1>", lambda e: self.hide())
@@ -471,20 +502,20 @@ class ControlWindow(tk.Toplevel):
         btn_min.bind("<Leave>", lambda e: btn_min.configure(fg="#9CA3AF"))
 
         # Main Toggle Card
-        self.card = tk.Frame(inner, bg="#22222E", padx=14, pady=10, highlightthickness=1, highlightbackground="#363648")
-        self.card.pack(fill="x", pady=(0, 10))
+        self.card = tk.Frame(inner, bg="#22222E", padx=14, pady=12, highlightthickness=1, highlightbackground="#363648")
+        self.card.pack(fill="x", pady=(0, 12))
 
-        card_left = tk.Frame(self.card, bg="#22222E")
-        card_left.pack(side="left", fill="both", expand=True)
+        self.card_left = tk.Frame(self.card, bg="#22222E")
+        self.card_left.pack(side="left", fill="both", expand=True)
 
-        lbl_serv = tk.Label(card_left, text="Screen Sharing", font=("Segoe UI", 8), fg="#9CA3AF", bg="#22222E")
-        lbl_serv.pack(anchor="w")
+        self.lbl_serv = tk.Label(self.card_left, text="SCREEN SHARING", font=("Segoe UI", 8, "bold"), fg="#9CA3AF", bg="#22222E")
+        self.lbl_serv.pack(anchor="w")
 
-        self.lbl_status = tk.Label(card_left, text="OFF", font=("Segoe UI", 14, "bold"), fg="#9CA3AF", bg="#22222E")
-        self.lbl_status.pack(anchor="w", pady=(1, 0))
+        self.lbl_status = tk.Label(self.card_left, text="OFF", font=("Segoe UI", 16, "bold"), fg="#9CA3AF", bg="#22222E")
+        self.lbl_status.pack(anchor="w", pady=(1, 1))
 
         self.lbl_substatus = tk.Label(
-            card_left,
+            self.card_left,
             text="All services stopped",
             font=("Segoe UI", 8),
             fg="#6B7280",
@@ -493,7 +524,7 @@ class ControlWindow(tk.Toplevel):
         self.lbl_substatus.pack(anchor="w")
 
         self.toggle = SmoothToggle(self.card, width=54, height=28, command=self._on_toggle, bg="#22222E")
-        self.toggle.pack(side="right", padx=(6, 0))
+        self.toggle.pack(side="right", padx=(8, 0))
 
         # Connection Mode Radio Group
         mode_box = tk.LabelFrame(
@@ -502,46 +533,86 @@ class ControlWindow(tk.Toplevel):
             font=("Segoe UI", 8, "bold"),
             fg="#9CA3AF",
             bg="#181822",
-            padx=10,
-            pady=6,
+            padx=12,
+            pady=10,
             highlightthickness=1,
             highlightbackground="#2C2C3C",
         )
-        mode_box.pack(fill="x", pady=(0, 10))
+        mode_box.pack(fill="x", pady=(0, 12))
 
         self.mode_var = tk.StringVar(value="cable")
 
         rb_cable = tk.Radiobutton(
             mode_box,
-            text="USB Cable (Recommended, 45 fps)",
+            text="⚡ USB Cable (Recommended, 45 fps)",
             variable=self.mode_var,
             value="cable",
-            font=("Segoe UI", 8),
-            fg="#E5E7EB",
+            font=("Segoe UI", 9),
+            fg="#FFFFFF",
             bg="#181822",
             selectcolor="#181822",
             activebackground="#181822",
-            activeforeground="#FFFFFF",
+            activeforeground="#38BDF8",
             command=self._on_mode_change,
             cursor="hand2",
         )
         rb_cable.pack(anchor="w")
 
+        lbl_cable_tip = tk.Label(
+            mode_box,
+            text="     Direct USB tethering with ultra-low latency",
+            font=("Segoe UI", 7),
+            fg="#6B7280",
+            bg="#181822",
+        )
+        lbl_cable_tip.pack(anchor="w")
+
         rb_wifi = tk.Radiobutton(
             mode_box,
-            text="Wi-Fi (HTTP Streaming)",
+            text="📶 Wi-Fi (HTTP Network Streaming)",
             variable=self.mode_var,
             value="wifi",
-            font=("Segoe UI", 8),
-            fg="#E5E7EB",
+            font=("Segoe UI", 9),
+            fg="#FFFFFF",
             bg="#181822",
             selectcolor="#181822",
             activebackground="#181822",
-            activeforeground="#FFFFFF",
+            activeforeground="#38BDF8",
             command=self._on_mode_change,
             cursor="hand2",
         )
-        rb_wifi.pack(anchor="w", pady=(2, 0))
+        rb_wifi.pack(anchor="w", pady=(6, 0))
+
+        lbl_wifi_tip = tk.Label(
+            mode_box,
+            text="     Wireless streaming over local Wi-Fi network",
+            font=("Segoe UI", 7),
+            fg="#6B7280",
+            bg="#181822",
+        )
+        lbl_wifi_tip.pack(anchor="w")
+
+        # Status / Guidance Box
+        info_box = tk.Frame(inner, bg="#1F1F2C", padx=10, pady=8, highlightthickness=1, highlightbackground="#2A2A38")
+        info_box.pack(fill="x", pady=(0, 14))
+
+        lbl_info1 = tk.Label(
+            info_box,
+            text="💡 Switch ON to extend desktop to your iPad.",
+            font=("Segoe UI", 8),
+            fg="#8E8EA0",
+            bg="#1F1F2C",
+        )
+        lbl_info1.pack(anchor="w")
+
+        lbl_info2 = tk.Label(
+            info_box,
+            text="   Switch OFF to disconnect and restore internal display.",
+            font=("Segoe UI", 8),
+            fg="#6B7280",
+            bg="#1F1F2C",
+        )
+        lbl_info2.pack(anchor="w")
 
         # Footer
         footer = tk.Frame(inner, bg="#181822")
@@ -562,7 +633,7 @@ class ControlWindow(tk.Toplevel):
 
         btn_exit = tk.Label(
             footer,
-            text="Exit App",
+            text="Exit Application",
             font=("Segoe UI", 8, "underline"),
             fg="#9CA3AF",
             bg="#181822",
@@ -572,6 +643,19 @@ class ControlWindow(tk.Toplevel):
         btn_exit.bind("<Button-1>", lambda e: self._exit_app())
         btn_exit.bind("<Enter>", lambda e: btn_exit.configure(fg="#EF4444"))
         btn_exit.bind("<Leave>", lambda e: btn_exit.configure(fg="#9CA3AF"))
+
+        self.update_idletasks()
+        self.width = max(370, self.winfo_reqwidth())
+        self.height = max(420, self.winfo_reqheight())
+
+    def _start_drag(self, event):
+        self._drag_x = event.x
+        self._drag_y = event.y
+
+    def _on_drag(self, event):
+        x = self.winfo_x() + (event.x - self._drag_x)
+        y = self.winfo_y() + (event.y - self._drag_y)
+        self.geometry(f"+{x}+{y}")
 
     def _on_toggle(self, is_on: bool):
         if is_on:
@@ -595,11 +679,21 @@ class ControlWindow(tk.Toplevel):
             mode_name = "USB Cable" if self.mode_var.get() == "cable" else "Wi-Fi"
             self.lbl_status.configure(text="ON", fg="#38BDF8")
             self.lbl_substatus.configure(text=f"Active ({mode_name}) • Display extended", fg="#38BDF8")
-            self.card.configure(highlightbackground="#0078D4")
+            self.card.configure(highlightbackground="#0284C7", bg="#1A2234")
+            self.card_left.configure(bg="#1A2234")
+            self.lbl_serv.configure(bg="#1A2234")
+            self.lbl_status.configure(bg="#1A2234")
+            self.lbl_substatus.configure(bg="#1A2234")
+            self.toggle.configure(bg="#1A2234")
         else:
             self.lbl_status.configure(text="OFF", fg="#9CA3AF")
             self.lbl_substatus.configure(text="All processes stopped", fg="#6B7280")
-            self.card.configure(highlightbackground="#363648")
+            self.card.configure(highlightbackground="#363648", bg="#22222E")
+            self.card_left.configure(bg="#22222E")
+            self.lbl_serv.configure(bg="#22222E")
+            self.lbl_status.configure(bg="#22222E")
+            self.lbl_substatus.configure(bg="#22222E")
+            self.toggle.configure(bg="#22222E")
 
     def show_window(self):
         pt = POINT()
@@ -612,16 +706,45 @@ class ControlWindow(tk.Toplevel):
         user32.GetMonitorInfoW(hmon, ctypes.byref(mi))
 
         work = mi.rcWork
-        # Position in bottom-right corner of that monitor, 16px from right edge, 12px above taskbar
-        x = work.right - self.width - 16
-        y = work.bottom - self.height - 12
+
+        # Recalculate dimensions dynamically
+        self.update_idletasks()
+        self.width = max(370, self.winfo_reqwidth())
+        self.height = max(420, self.winfo_reqheight())
+
+        # Horizontal positioning:
+        # If clicked in tray area (right side of monitor), center relative to click
+        if pt.x >= work.left + (work.right - work.left) // 2:
+            cand_x = pt.x - self.width // 2
+            x = max(work.left + 16, min(cand_x, work.right - self.width - 16))
+        else:
+            x = work.right - self.width - 16
+
+        # Vertical positioning:
+        # Hover cleanly 14px above the taskbar
+        y = work.bottom - self.height - 14
 
         # If taskbar is at top of screen:
-        if pt.y < (work.top + work.bottom) // 2:
-            y = work.top + 12
+        if pt.y < (work.top + work.bottom) // 2 and work.top > mi.rcMonitor.top:
+            y = work.top + 14
 
         self.geometry(f"{self.width}x{self.height}+{x}+{y}")
         self.update_state(self.manager.is_running())
+
+        # Apply Windows 11 DWM rounded corners and dark mode
+        try:
+            hwnd = user32.GetParent(self.winfo_id()) or self.winfo_id()
+            corner = ctypes.c_int(2)  # DWMWCP_ROUND
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                wintypes.HWND(hwnd), 33, ctypes.byref(corner), ctypes.sizeof(corner)
+            )
+            dark = ctypes.c_int(1)
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                wintypes.HWND(hwnd), 20, ctypes.byref(dark), ctypes.sizeof(dark)
+            )
+        except Exception:
+            pass
+
         self.deiconify()
         self.lift()
         self.attributes("-topmost", True)
@@ -651,8 +774,8 @@ class ControlWindow(tk.Toplevel):
                 user32.GetCursorPos(ctypes.byref(pt))
                 wx = self.winfo_x()
                 wy = self.winfo_y()
-                ww = self.winfo_width()
-                wh = self.winfo_height()
+                ww = max(self.width, self.winfo_width())
+                wh = max(self.height, self.winfo_height())
 
                 # If click occurred outside the flyout window
                 if not (wx <= pt.x <= wx + ww and wy <= pt.y <= wy + wh):
