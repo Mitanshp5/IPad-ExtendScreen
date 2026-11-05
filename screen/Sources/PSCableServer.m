@@ -1,5 +1,4 @@
 #import "PSCableServer.h"
-#import "PSLogger.h"
 
 #import <arpa/inet.h>
 #import <errno.h>
@@ -42,14 +41,10 @@ static const NSUInteger PSCableMaximumFrame = 4 * 1024 * 1024;
         });
         return result;
     }
-    PSLog(@"[PSCableServer startOnPort:%u]", (unsigned)port);
     [self stop];
 
     int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) {
-        PSLog(@"[PSCableServer startOnPort] socket() failed: %d (%s)", errno, strerror(errno));
-        return NO;
-    }
+    if (fd < 0) return NO;
     int yes = 1;
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
     struct sockaddr_in address;
@@ -59,12 +54,10 @@ static const NSUInteger PSCableMaximumFrame = 4 * 1024 * 1024;
     address.sin_port = htons(port);
     address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     if (bind(fd, (struct sockaddr *)&address, sizeof(address)) != 0) {
-        PSLog(@"[PSCableServer startOnPort] bind() failed: %d (%s)", errno, strerror(errno));
         close(fd);
         return NO;
     }
     if (listen(fd, 2) != 0) {
-        PSLog(@"[PSCableServer startOnPort] listen() failed: %d (%s)", errno, strerror(errno));
         close(fd);
         return NO;
     }
@@ -84,7 +77,6 @@ static const NSUInteger PSCableMaximumFrame = 4 * 1024 * 1024;
         dispatch_async(dispatch_get_main_queue(), ^{ [self stop]; });
         return;
     }
-    PSLog(@"[PSCableServer stop] called from:\n%@", [NSThread callStackSymbols]);
     int listenFD = -1;
     int clientFD = -1;
     @synchronized (self) {
@@ -111,14 +103,12 @@ static const NSUInteger PSCableMaximumFrame = 4 * 1024 * 1024;
                 listenFD = _listenFD;
             }
             if (listenFD < 0) break;
-            PSLog(@"[acceptLoop] calling accept()...");
             int client = accept(listenFD, NULL, NULL);
             if (client < 0) {
                 @synchronized (self) {
                     if (!_running) break;
                 }
                 if (errno == EINTR) continue;
-                PSLog(@"[acceptLoop] accept() returned < 0: %d (%s)", errno, strerror(errno));
                 [NSThread sleepForTimeInterval:0.15];
                 continue;
             }
@@ -130,28 +120,24 @@ static const NSUInteger PSCableMaximumFrame = 4 * 1024 * 1024;
                     break;
                 }
                 if (_clientFD >= 0) {
-                    PSLog(@"[acceptLoop] rejecting extra client fd=%d", client);
                     close(client);
                     continue;
                 }
                 _clientFD = client;
                 _hostAcceptsInput = YES;
             }
-            PSLog(@"[acceptLoop] client connected fd=%d", client);
             [self reportStatus:@"USB cable connected..." streaming:NO];
             [self handleClient:client];
             @synchronized (self) {
                 if (_clientFD == client) _clientFD = -1;
             }
             close(client);
-            PSLog(@"[acceptLoop] client closed fd=%d", client);
             @synchronized (self) {
                 if (!_running) break;
             }
             [self reportStatus:@"USB cable disconnected. Waiting for the PC..." streaming:NO];
         }
     }
-    PSLog(@"[acceptLoop] exited");
 }
 
 - (void)handleClient:(int)fd {
@@ -161,24 +147,17 @@ static const NSUInteger PSCableMaximumFrame = 4 * 1024 * 1024;
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
 
     NSString *magic = [self readLineFrom:fd maximum:16];
-    PSLog(@"[handleClient] magic='%@'", magic);
     if (![magic isEqualToString:@"ESP1"]) {
-        PSLog(@"[handleClient] unsupported magic: %@", magic);
         [self sendLine:@{@"type": @"error", @"message": @"unsupported cable protocol"} to:fd];
         return;
     }
     NSString *line = [self readLineFrom:fd maximum:PSCableMaximumLine];
-    if (!line.length) {
-        PSLog(@"[handleClient] empty handshake line");
-        return;
-    }
+    if (!line.length) return;
     NSData *lineData = [line dataUsingEncoding:NSUTF8StringEncoding];
     id decoded = [NSJSONSerialization JSONObjectWithData:lineData options:0 error:NULL];
     NSDictionary *hello = [decoded isKindOfClass:[NSDictionary class]] ? decoded : nil;
-    PSLog(@"[handleClient] hello=%@", hello);
     if (!hello || ![hello[@"type"] isEqual:@"hello"] ||
         (hello[@"version"] && [hello[@"version"] integerValue] != 1)) {
-        PSLog(@"[handleClient] invalid handshake hello: %@", hello);
         [self sendLine:@{@"type": @"error", @"message": @"invalid cable handshake"} to:fd];
         return;
     }
@@ -186,51 +165,23 @@ static const NSUInteger PSCableMaximumFrame = 4 * 1024 * 1024;
     @synchronized (self) {
         _hostAcceptsInput = hello[@"input"] ? [hello[@"input"] boolValue] : YES;
     }
-    if (![self sendLine:@{@"type": @"welcome", @"input": @YES, @"version": @"1.0.7"} to:fd]) {
-        PSLog(@"[handleClient] failed to send welcome reply");
-        return;
-    }
-    PSLog(@"[handleClient] handshake complete, reporting streaming=YES");
+    if (![self sendLine:@{@"type": @"welcome", @"input": @YES, @"version": @"1.0.7"} to:fd]) return;
     [self reportStatus:@"USB cable connected. Streaming." streaming:YES];
 
-    NSUInteger frameCount = 0;
     while (YES) {
         @autoreleasepool {
             uint32_t networkLength = 0;
-            if (![self readAllFrom:fd buffer:&networkLength length:sizeof(networkLength)]) {
-                PSLog(@"[handleClient] readAllFrom header failed after %lu frames (errno=%d: %s)",
-                      (unsigned long)frameCount, errno, strerror(errno));
-                break;
-            }
+            if (![self readAllFrom:fd buffer:&networkLength length:sizeof(networkLength)]) break;
             uint32_t length = ntohl(networkLength);
-            if (length < 4 || length > PSCableMaximumFrame) {
-                PSLog(@"[handleClient] invalid length %u after %lu frames", length, (unsigned long)frameCount);
-                break;
-            }
+            if (length < 4 || length > PSCableMaximumFrame) break;
             NSMutableData *jpeg = [NSMutableData dataWithLength:length];
-            if (!jpeg) {
-                PSLog(@"[handleClient] OOM: failed to allocate %u bytes for frame %lu", length, (unsigned long)frameCount);
-                break;
-            }
-            if (![self readAllFrom:fd buffer:jpeg.mutableBytes length:length]) {
-                PSLog(@"[handleClient] readAllFrom payload (%u bytes) failed for frame %lu (errno=%d: %s)",
-                      length, (unsigned long)frameCount, errno, strerror(errno));
-                break;
-            }
+            if (!jpeg || ![self readAllFrom:fd buffer:jpeg.mutableBytes length:length]) break;
             @synchronized (self) {
-                if (!_running) {
-                    PSLog(@"[handleClient] _running is NO during frame %lu", (unsigned long)frameCount);
-                    break;
-                }
-            }
-            frameCount++;
-            if (frameCount <= 5 || frameCount % 60 == 0) {
-                PSLog(@"[handleClient] frame %lu (%u bytes) received and forwarded", (unsigned long)frameCount, length);
+                if (!_running) break;
             }
             [self reportFrame:jpeg];
         }
     }
-    PSLog(@"[handleClient] exited loop after %lu frames", (unsigned long)frameCount);
 }
 
 - (NSString *)readLineFrom:(int)fd maximum:(NSUInteger)maximum {
@@ -256,13 +207,9 @@ static const NSUInteger PSCableMaximumFrame = 4 * 1024 * 1024;
     NSUInteger offset = 0;
     while (offset < length) {
         ssize_t received = recv(fd, bytes + offset, length - offset, 0);
-        if (received == 0) {
-            PSLog(@"[readAllFrom] EOF received at offset %lu/%lu", (unsigned long)offset, (unsigned long)length);
-            return NO;
-        }
+        if (received == 0) return NO;
         if (received < 0) {
             if (errno == EINTR) continue;
-            PSLog(@"[readAllFrom] recv error %d (%s) at offset %lu/%lu", errno, strerror(errno), (unsigned long)offset, (unsigned long)length);
             return NO;
         }
         offset += (NSUInteger)received;

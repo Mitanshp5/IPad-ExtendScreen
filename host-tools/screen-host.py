@@ -1064,7 +1064,6 @@ def usbmux_connect(address: str, device_port: int, udid: Optional[str] = None) -
 
 def _cable_input_reader(sock: socket.socket, backend: object, stop: threading.Event) -> None:
     buffer = bytearray()
-    print("Cable input reader: started.", flush=True)
     while not stop.is_set():
         try:
             chunk = sock.recv(4096)
@@ -1197,11 +1196,7 @@ def run_cable(config: Config, args: argparse.Namespace,
                                   name="extendscreen-cable-input", daemon=True)
         reader.start()
         last_sequence = sequence
-        total_frames = 1
-        last_log_time = time.monotonic()
-        print(f"Sending the first cable frame ({len(first)} bytes)...", flush=True)
         sock.sendall(struct.pack(">I", len(first)) + first)
-        print("First cable frame sent; streaming screen frames.", flush=True)
         while not stop.is_set():
             sequence, frame, error = source.wait_frame(last_sequence, 5.0)
             if frame is None:
@@ -1212,15 +1207,9 @@ def run_cable(config: Config, args: argparse.Namespace,
             try:
                 sock.sendall(struct.pack(">I", len(frame)) + frame)
             except OSError as send_err:
-                print(f"Cable stream stopped: failed to send frame {total_frames+1} ({len(frame)} bytes): {send_err}",
-                      file=sys.stderr)
+                print(f"Cable stream stopped: connection closed: {send_err}", file=sys.stderr)
                 raise
             last_sequence = sequence
-            total_frames += 1
-            now = time.monotonic()
-            if now - last_log_time >= 3.0:
-                print(f"Cable stream active: sent {total_frames} frames (last frame {len(frame)} bytes)", flush=True)
-                last_log_time = now
     except KeyboardInterrupt:
         print("\nStopping cable stream.")
     except (OSError, ConnectionError, ValueError, RuntimeError) as error:

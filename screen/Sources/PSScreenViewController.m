@@ -1,5 +1,4 @@
 #import "PSScreenViewController.h"
-#import "PSLogger.h"
 #import "PSSettingsViewController.h"
 #import "PSKeyboardViewController.h"
 #import "PSStreamClient.h"
@@ -240,7 +239,6 @@ static const CGFloat PSChromeHotZoneHeight = 140.0;
 }
 
 - (void)activateIfNeeded {
-    PSLog(@"[activateIfNeeded] enter: viewVisible=%d, window=%p", self.viewVisible, self.view.window);
     if (!self.viewVisible || !self.view.window) return;
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     NSString *server = [defaults stringForKey:PSServerURLKey];
@@ -255,12 +253,8 @@ static const CGFloat PSChromeHotZoneHeight = 140.0;
     NSString *signature = [NSString stringWithFormat:@"%ld|%@|%ld|%d|%lx",
         (long)mode, server ?: @"", (long)fps, inputEnabled,
         (unsigned long)token.hash];
-    PSLog(@"[activateIfNeeded] mode=%ld sig=%@ lastSig=%@ streaming=%d connecting=%d cableMode=%d",
-          (long)mode, signature, self.lastSignature, self.streaming, self.connecting, self.cableMode);
     if ((self.streaming || self.connecting) && [signature isEqualToString:self.lastSignature]) return;
     if (self.reconnectTimer && [signature isEqualToString:self.lastSignature]) return;
-
-    PSLog(@"[activateIfNeeded] calling stopEverything because sig or status changed");
     [self stopEverything];
     self.lastSignature = signature;
     self.serverURL = server;
@@ -269,7 +263,6 @@ static const CGFloat PSChromeHotZoneHeight = 140.0;
     self.inputEnabled = inputEnabled;
 
     if (mode == PSModeCable) {
-        PSLog(@"[activateIfNeeded] starting USB cable mode");
         self.cableMode = YES;
         self.acceptFrames = YES;
         self.connecting = YES;
@@ -277,7 +270,6 @@ static const CGFloat PSChromeHotZoneHeight = 140.0;
         [self setStatus:@"Starting the USB cable listener..."];
         if (![self.cableServer startOnPort:PSCableListenPort]) {
             self.connecting = NO;
-            PSLog(@"[activateIfNeeded] could not start USB cable listener!");
             [self setStatus:@"Could not start the USB cable listener on 127.0.0.1."];
         }
         return;
@@ -348,8 +340,6 @@ static const CGFloat PSChromeHotZoneHeight = 140.0;
         });
         return;
     }
-    PSLog(@"[cableServer:status:streaming:] status='%@' streaming=%d, current cableMode=%d",
-          status, streaming, self.cableMode);
     if (!self.cableMode) return;
     self.connecting = YES;
     if (streaming) {
@@ -365,8 +355,6 @@ static const CGFloat PSChromeHotZoneHeight = 140.0;
 
 - (void)cableServer:(PSCableServer *)server frame:(NSData *)jpeg {
     if (!self.cableMode || !self.acceptFrames) {
-        PSLog(@"[cableServer:frame:] dropped frame (%lu bytes): cableMode=%d acceptFrames=%d",
-              (unsigned long)jpeg.length, self.cableMode, self.acceptFrames);
         return;
     }
     [self receiveFrame:jpeg];
@@ -391,7 +379,6 @@ static const CGFloat PSChromeHotZoneHeight = 140.0;
 }
 
 - (void)stopEverything {
-    PSLog(@"[stopEverything] called from:\n%@", [NSThread callStackSymbols]);
     self.acceptFrames = NO;
     self.streaming = NO;
     self.connecting = NO;
@@ -423,14 +410,8 @@ static const CGFloat PSChromeHotZoneHeight = 140.0;
                 if (cgImage) {
                     image = [UIImage imageWithCGImage:cgImage];
                     CGImageRelease(cgImage);
-                } else {
-                    PSLog(@"[receiveFrame] CGImageSourceCreateImageAtIndex returned NULL for %lu bytes",
-                          (unsigned long)jpeg.length);
                 }
                 CFRelease(source);
-            } else {
-                PSLog(@"[receiveFrame] CGImageSourceCreateWithData returned NULL for %lu bytes",
-                      (unsigned long)jpeg.length);
             }
             dispatch_async(dispatch_get_main_queue(), ^{
                 PSScreenViewController *controller = weakSelf;
@@ -625,21 +606,17 @@ static const CGFloat PSChromeHotZoneHeight = 140.0;
 }
 
 - (void)appResignedActive {
-    PSLog(@"[appResignedActive] cableMode=%d", self.cableMode);
     if (self.cableMode) return;
     [self stopEverything];
 }
 
 - (void)appBackgrounded {
-    PSLog(@"[appBackgrounded] cableMode=%d", self.cableMode);
     self.viewVisible = NO;
     [self stopEverything];
     [self stopFPSTimer];
 }
 
 - (void)appActivated {
-    PSLog(@"[appActivated] topVC=%@, window=%p, cableMode=%d",
-          self.navigationController.topViewController, self.view.window, self.cableMode);
     if (self.navigationController.topViewController != self) return;
     if (!self.view.window) return;
     self.viewVisible = YES;

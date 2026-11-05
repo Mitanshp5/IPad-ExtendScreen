@@ -43,8 +43,7 @@ ExtendScreen allows using an iPad mini (1st Generation, iOS 9.3.5) as an extende
 |  |  - Touch Gestures (tap, right click, pan/drag)                            |  |
 |  |  - Forwarding to PSCableServer / PSInputClient                            |  |
 |  |                                                                           |  |
-|  |  [Diagnostics & Logging]                                                  |  |
-|  |  PSLogger -> NSLog & /tmp/ExtendScreen.log                                |  |
+|  |  (Verbose diagnostics & PSLogger are maintained on the `development` branch)|
 |  +---------------------------------------------------------------------------+  |
 |                                                                                 |
 |  +---------------------------------------------------------------------------+  |
@@ -123,10 +122,9 @@ ExtendScreen allows using an iPad mini (1st Generation, iOS 9.3.5) as an extende
 - **`PSNavigationController`**:
   - Subclasses `UINavigationController` to override `childViewControllerForStatusBarHidden` returning `topViewController`.
   - Auto-hides top status bar (battery/time/Wi-Fi) after 4.5 seconds alongside chrome buttons (`setNeedsStatusBarAppearanceUpdate`).
-- **`PSLogger`**:
-  - Dual output: writes simultaneously to `NSLog` (ASL / idevicesyslog) and `/tmp/ExtendScreen.log`.
-  - Timestamped with milliseconds.
-  - Full stack-trace logging on teardown (`[NSThread callStackSymbols]`).
+
+> **Note on Diagnostics (`development` branch)**:
+> In the `development` branch, `PSLogger` is included for file logging to `/tmp/ExtendScreen.log` and ASL console with full callstack symbols on connection drops. In the `main` branch, logging overhead is stripped for optimal performance and memory efficiency.
 
 ---
 
@@ -141,3 +139,4 @@ ExtendScreen allows using an iPad mini (1st Generation, iOS 9.3.5) as an extende
   - Automatically detects monitor region and maps to DirectX output index.
   - Gracefully falls back to `gdigrab` if Desktop Duplication is unavailable or encounters an access error.
   - Encodes frames directly to MJPEG (`-c:v mjpeg -q:v 5 -pix_fmt yuvj420p`).
+
