@@ -171,6 +171,101 @@ def ensure_tray_icons():
 
 
 # =====================================================================
+# Display Switching & Job Management Helpers
+# =====================================================================
+
+def set_display_internal() -> bool:
+    """Instantly switches Windows display configuration to single-screen (internal)."""
+    try:
+        ensure_default_desktop()
+        SDC_APPLY = 0x00000080
+        SDC_TOPOLOGY_INTERNAL = 0x00000001
+        res = user32.SetDisplayConfig(0, None, 0, None, SDC_APPLY | SDC_TOPOLOGY_INTERNAL)
+        if res == 0:
+            return True
+    except Exception:
+        pass
+
+    try:
+        display_switch = os.path.join(
+            os.environ.get("WINDIR", r"C:\Windows"), "System32", "DisplaySwitch.exe"
+        )
+        subprocess.run([display_switch, "/internal"], capture_output=True, creationflags=CREATE_NO_WINDOW)
+        return True
+    except Exception:
+        return False
+
+
+def setup_process_job():
+    """Create a Windows Job Object configured to kill child processes if parent dies."""
+    try:
+        hJob = kernel32.CreateJobObjectW(None, None)
+        class JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
+            _fields_ = [
+                ('PerProcessUserTimeLimit', wintypes.LARGE_INTEGER),
+                ('PerJobUserTimeLimit', wintypes.LARGE_INTEGER),
+                ('LimitFlags', wintypes.DWORD),
+                ('MinimumWorkingSetSize', ctypes.c_size_t),
+                ('MaximumWorkingSetSize', ctypes.c_size_t),
+                ('ActiveProcessLimit', wintypes.DWORD),
+                ('Affinity', ctypes.c_size_t),
+                ('PriorityClass', wintypes.DWORD),
+                ('SchedulingClass', wintypes.DWORD),
+            ]
+        class IO_COUNTERS(ctypes.Structure):
+            _fields_ = [
+                ('ReadOperationCount', ctypes.c_uint64),
+                ('WriteOperationCount', ctypes.c_uint64),
+                ('OtherOperationCount', ctypes.c_uint64),
+                ('ReadTransferCount', ctypes.c_uint64),
+                ('WriteTransferCount', ctypes.c_uint64),
+                ('OtherTransferCount', ctypes.c_uint64),
+            ]
+        class JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
+            _fields_ = [
+                ('BasicInformation', JOBOBJECT_BASIC_LIMIT_INFORMATION),
+                ('IoCounters', IO_COUNTERS),
+                ('ProcessMemoryLimit', ctypes.c_size_t),
+                ('JobMemoryLimit', ctypes.c_size_t),
+                ('PeakProcessMemoryLimit', ctypes.c_size_t),
+                ('PeakJobMemoryLimit', ctypes.c_size_t),
+            ]
+        info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
+        info.BasicInformation.LimitFlags = 0x00002000 # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        kernel32.SetInformationJobObject(hJob, 9, ctypes.byref(info), ctypes.sizeof(info))
+        return hJob
+    except Exception:
+        return None
+
+
+# Global exit handlers to guarantee display restoration on any exit
+import atexit
+import signal
+
+def _emergency_cleanup():
+    set_display_internal()
+
+atexit.register(_emergency_cleanup)
+
+try:
+    PHANDLER_ROUTINE = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.DWORD)
+    def _console_ctrl_handler(dwCtrlType):
+        _emergency_cleanup()
+        return False
+    _global_ctrl_handler = PHANDLER_ROUTINE(_console_ctrl_handler)
+    kernel32.SetConsoleCtrlHandler(_global_ctrl_handler, True)
+except Exception:
+    pass
+
+for sig in (getattr(signal, "SIGINT", None), getattr(signal, "SIGTERM", None), getattr(signal, "SIGBREAK", None)):
+    if sig is not None:
+        try:
+            signal.signal(sig, lambda s, f: (_emergency_cleanup(), sys.exit(0)))
+        except Exception:
+            pass
+
+
+# =====================================================================
 # Service Controller (Starts, Kills, and Monitors screen-host.py)
 # =====================================================================
 
@@ -184,6 +279,7 @@ class ExtendServiceManager:
         self.on_status_change = on_status_change
         self.monitor_thread: Optional[threading.Thread] = None
         self.stop_requested = False
+        self.job = setup_process_job()
 
     def is_running(self) -> bool:
         if self.proc is not None:
@@ -200,7 +296,7 @@ class ExtendServiceManager:
         # Kill any prior orphan processes before starting
         self.kill_all(reset_display=False)
 
-        cmd = [sys.executable, str(HOST_SCRIPT)]
+        cmd = [sys.executable, str(HOST_SCRIPT), "--parent-pid", str(os.getpid())]
         if mode == "cable":
             cmd.extend(["--cable", "--extend", "--fps", str(fps)])
         else:
@@ -220,6 +316,12 @@ class ExtendServiceManager:
                 text=True,
                 bufsize=1,
             )
+
+            if self.job and hasattr(self.proc, "_handle") and self.proc._handle:
+                try:
+                    kernel32.AssignProcessToJobObject(self.job, int(self.proc._handle))
+                except Exception:
+                    pass
 
             self.monitor_thread = threading.Thread(target=self._monitor_process, daemon=True)
             self.monitor_thread.start()
@@ -291,30 +393,9 @@ class ExtendServiceManager:
         except Exception:
             pass
 
-        # 3. Terminate any orphaned ffmpeg instances running screen capture
-        try:
-            ps_ffmpeg = (
-                'Get-CimInstance Win32_Process | '
-                'Where-Object { $_.Name -eq "ffmpeg.exe" -and ($_.CommandLine -like "*ddagrab*" -or $_.CommandLine -like "*gdigrab*") } | '
-                'ForEach-Object { Stop-Process -Id $_.ProcessId -Force }'
-            )
-            subprocess.run(
-                ["powershell", "-NoProfile", "-Command", ps_ffmpeg],
-                capture_output=True,
-                creationflags=CREATE_NO_WINDOW,
-            )
-        except Exception:
-            pass
-
         # 4. Revert Windows display layout to single-screen (internal)
         if reset_display:
-            try:
-                display_switch = os.path.join(
-                    os.environ.get("WINDIR", r"C:\Windows"), "System32", "DisplaySwitch.exe"
-                )
-                subprocess.run([display_switch, "/internal"], capture_output=True, creationflags=CREATE_NO_WINDOW)
-            except Exception:
-                pass
+            set_display_internal()
 
         with open(LOG_FILE, "a", encoding="utf-8") as log_out:
             log_out.write(f"--- All processes killed at {time.ctime()} ---\n")
@@ -952,6 +1033,7 @@ class ExtendScreenTrayApp:
         self.root = tk.Tk()
         self.root.title("ExtendScreen_MasterRoot")
         self.root.withdraw()
+        self.root.protocol("WM_DELETE_WINDOW", self.quit_app)
 
         self.img_off = Image.open(TRAY_OFF_PNG)
         self.img_on = Image.open(TRAY_ON_PNG)
@@ -1003,7 +1085,11 @@ class ExtendScreenTrayApp:
             pass
 
     def quit_app(self):
-        self.manager.kill_all(reset_display=True)
+        try:
+            self.manager.kill_all(reset_display=True)
+            set_display_internal()
+        except Exception:
+            pass
         try:
             self.tray.stop()
         except Exception:

@@ -233,8 +233,28 @@ class DisplayTopology:
 
     def __init__(self, enabled: bool) -> None:
         self.enabled = enabled
+        if self.enabled:
+            import atexit
+            atexit.register(self.disable, "Process exit cleanup")
 
     def _switch(self, option: str) -> bool:
+        if os.name == "nt":
+            try:
+                user32 = ctypes.windll.user32
+                hdesk = user32.OpenDesktopW("default", 0, False, 0x01FF)
+                if hdesk:
+                    user32.SetThreadDesktop(hdesk)
+                SDC_APPLY = 0x00000080
+                SDC_TOPOLOGY_INTERNAL = 0x00000001
+                SDC_TOPOLOGY_EXTEND = 0x00000004
+                flag = SDC_TOPOLOGY_INTERNAL if option == "/internal" else (SDC_TOPOLOGY_EXTEND if option == "/extend" else None)
+                if flag is not None:
+                    res = user32.SetDisplayConfig(0, None, 0, None, SDC_APPLY | flag)
+                    if res == 0:
+                        return True
+            except Exception:
+                pass
+
         executable = os.path.join(os.environ.get("WINDIR", r"C:\Windows"),
                                   "System32", "DisplaySwitch.exe")
         try:
@@ -1652,6 +1672,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--usbmux", default=None,
                         help="usbmuxd address (default: 127.0.0.1:27015 or /var/run/usbmuxd)")
     parser.add_argument("--udid", default=None, help="select a connected iPad by UDID or serial")
+    parser.add_argument("--parent-pid", type=int, default=None,
+                        help="watchdog: terminate and reset display layout if this parent PID exits")
     return parser
 
 
@@ -1671,6 +1693,29 @@ def main(argv: Optional[list[str]] = None) -> int:
     enable_dpi_awareness()
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    if getattr(args, "parent_pid", None) and os.name == "nt":
+        def _on_parent_exit():
+            print("Display: parent controller exited; restoring single-screen mode.", flush=True)
+            topology = DisplayTopology(True)
+            topology.disable("Parent controller exited")
+            os._exit(0)
+
+        def _watch_parent():
+            kernel32 = ctypes.windll.kernel32
+            SYNCHRONIZE = 0x00100000
+            hProc = kernel32.OpenProcess(SYNCHRONIZE, False, int(args.parent_pid))
+            if not hProc:
+                _on_parent_exit()
+                return
+            try:
+                kernel32.WaitForSingleObject(hProc, 0xFFFFFFFF)
+            finally:
+                kernel32.CloseHandle(hProc)
+                _on_parent_exit()
+
+        threading.Thread(target=_watch_parent, daemon=True, name="ParentWatchdog").start()
+
     if args.list_monitors:
         print_monitors()
         return 0
