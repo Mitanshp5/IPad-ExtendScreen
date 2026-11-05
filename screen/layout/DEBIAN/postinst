@@ -1,0 +1,13 @@
+#!/bin/sh
+set -e
+
+if [ "${1:-}" = "configure" ]; then
+    if [ ! -x /usr/bin/uicache ]; then
+        printf '%s\n' 'ExtendScreen: /usr/bin/uicache is unavailable; app registration was not requested.' >&2
+        exit 1
+    fi
+    printf '%s\n' 'ExtendScreen: requesting Home Screen app registration...' >&2
+    /usr/bin/uicache
+    printf '%s\n' 'ExtendScreen: registration tool finished. Check the Home Screen for Extend Screen.' >&2
+fi
+exit 0

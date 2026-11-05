@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>ExtendScreenServerURL</key>
+	<string>http://192.168.0.108:8644</string>
+	<key>ExtendScreenFPS</key>
+	<integer>12</integer>
+	<key>ExtendScreenInputEnabled</key>
+	<true/>
+	<key>ExtendScreenShowFPS</key>
+	<false/>
+	<key>ExtendScreenConnectionMode</key>
+	<integer>0</integer>
+	<key>ExpectedVersion</key>
+	<string>1.0.0</string>
+</dict>
+</plist>
