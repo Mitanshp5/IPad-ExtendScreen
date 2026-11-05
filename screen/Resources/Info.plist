@@ -54,21 +54,15 @@
 		<string>UIInterfaceOrientationPortrait</string>
 		<string>UIInterfaceOrientationPortraitUpsideDown</string>
 	</array>
+	<key>CFBundleIconFile</key>
+	<string>Icon.png</string>
 	<key>CFBundleIcons</key>
 	<dict>
 		<key>CFBundlePrimaryIcon</key>
 		<dict>
 			<key>CFBundleIconFiles</key>
 			<array>
-				<string>Icon-76.png</string>
-				<string>Icon-72.png</string>
-				<string>Icon-152.png</string>
-				<string>Icon-40.png</string>
-				<string>Icon-29.png</string>
-				<string>Icon-80.png</string>
-				<string>Icon-32.png</string>
-				<string>Icon-16.png</string>
-				<string>Icon-512.png</string>
+				<string>Icon.png</string>
 			</array>
 		</dict>
 	</dict>
