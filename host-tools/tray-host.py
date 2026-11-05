@@ -25,6 +25,22 @@ from typing import Optional
 from PIL import Image, ImageTk, ImageEnhance
 import pystray
 
+# Ensure all threads bind to the interactive 'Default' desktop
+def ensure_default_desktop():
+    try:
+        hdesk = user32.OpenDesktopW("default", 0, False, 0x01FF)
+        if hdesk:
+            user32.SetThreadDesktop(hdesk)
+    except Exception:
+        pass
+
+ensure_default_desktop()
+_orig_bootstrap = threading.Thread._bootstrap
+def _patched_bootstrap(self):
+    ensure_default_desktop()
+    return _orig_bootstrap(self)
+threading.Thread._bootstrap = _patched_bootstrap
+
 # DPI Awareness
 try:
     ctypes.windll.shcore.SetProcessDpiAwareness(2)
@@ -575,7 +591,7 @@ class ExtendScreenTrayApp:
         self.root.title("ExtendScreenTrayHiddenHost")
         self.root.withdraw()
 
-        self.img_on = Image.open(ICON_PNG)
+        self.img_on = Image.open(ICON_PNG).resize((64, 64), Image.Resampling.LANCZOS)
         enh = ImageEnhance.Brightness(self.img_on.convert("L").convert("RGBA"))
         self.img_off = enh.enhance(0.55)
 
