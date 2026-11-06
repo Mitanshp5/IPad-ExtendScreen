@@ -20,3 +20,4 @@ __pycache__/
 Thumbs.db
 .local/
 host-tools/session.json
+host-tools/settings.json
