@@ -34,7 +34,9 @@
 
 - (void)setupCameraSession {
     self.session = [AVCaptureSession new];
-    if ([self.session canSetSessionPreset:AVCaptureSessionPresetMedium]) {
+    if ([self.session canSetSessionPreset:AVCaptureSessionPresetHigh]) {
+        self.session.sessionPreset = AVCaptureSessionPresetHigh;
+    } else if ([self.session canSetSessionPreset:AVCaptureSessionPresetMedium]) {
         self.session.sessionPreset = AVCaptureSessionPresetMedium;
     }
 
@@ -44,12 +46,18 @@
         return;
     }
 
-    if ([device isFocusModeSupported:AVCaptureFocusModeContinuousAutoFocus]) {
-        NSError *lockError = nil;
-        if ([device lockForConfiguration:&lockError]) {
+    NSError *lockError = nil;
+    if ([device lockForConfiguration:&lockError]) {
+        if ([device isFocusModeSupported:AVCaptureFocusModeContinuousAutoFocus]) {
             device.focusMode = AVCaptureFocusModeContinuousAutoFocus;
-            [device unlockForConfiguration];
         }
+        if ([device isExposureModeSupported:AVCaptureExposureModeContinuousAutoExposure]) {
+            device.exposureMode = AVCaptureExposureModeContinuousAutoExposure;
+        }
+        if ([device isAutoFocusRangeRestrictionSupported]) {
+            device.autoFocusRangeRestriction = AVCaptureAutoFocusRangeRestrictionNear;
+        }
+        [device unlockForConfiguration];
     }
 
     NSError *inputError = nil;
@@ -299,3 +307,4 @@ didOutputMetadataObjects:(NSArray *)metadataObjects
 }
 
 @end
+

@@ -27,14 +27,14 @@ from typing import Optional
 from PIL import Image, ImageTk, ImageDraw, ImageFilter
 import pystray
 
-def render_qr_image(data: str, size: int = 140) -> Optional[Image.Image]:
+def render_qr_image(data: str, size: int = 260) -> Optional[Image.Image]:
     """Generates a clean black & white QR code PIL image."""
     try:
         import qrcode
         qr = qrcode.QRCode(
-            version=1,
+            version=None,
             error_correction=qrcode.constants.ERROR_CORRECT_M,
-            box_size=4,
+            box_size=8,
             border=2,
         )
         qr.add_data(data)
@@ -57,6 +57,92 @@ def render_qr_image(data: str, size: int = 140) -> Optional[Image.Image]:
         pass
 
     return None
+
+
+class LargeQRWindow(tk.Toplevel):
+    """Large, high-contrast modal QR code window for easy scanning from a distance."""
+
+    def __init__(self, master, url: str, code: str):
+        super().__init__(master)
+        self.title("Scan to Pair iPad")
+        self.configure(bg="#0B132B")
+        self.resizable(False, False)
+        self.attributes("-topmost", True)
+
+        qr_payload = f"{url}/?code={code}"
+        qr_img = render_qr_image(qr_payload, size=350)
+        self.qr_photo = ImageTk.PhotoImage(qr_img) if qr_img else None
+
+        card = tk.Frame(self, bg="#0B132B", padx=24, pady=20)
+        card.pack(fill="both", expand=True)
+
+        header = tk.Frame(card, bg="#0B132B")
+        header.pack(fill="x", pady=(0, 10))
+
+        tk.Label(
+            header,
+            text="📶 SCAN TO PAIR IPAD",
+            font=("Segoe UI", 11, "bold"),
+            fg="#38BDF8",
+            bg="#0B132B",
+        ).pack(side="left")
+
+        btn_close = tk.Label(
+            header,
+            text="✕",
+            font=("Segoe UI", 12),
+            fg="#94A3B8",
+            bg="#0B132B",
+            cursor="hand2",
+        )
+        btn_close.pack(side="right")
+        btn_close.bind("<Button-1>", lambda e: self.destroy())
+
+        qr_border = tk.Frame(card, bg="#FFFFFF", padx=8, pady=8)
+        qr_border.pack(pady=6)
+
+        if self.qr_photo:
+            lbl = tk.Label(qr_border, image=self.qr_photo, bg="#FFFFFF", cursor="hand2")
+            lbl.pack()
+            lbl.bind("<Button-1>", lambda e: self.destroy())
+
+        c_str = str(code)
+        formatted = f"{c_str[:4]}  {c_str[4:]}" if len(c_str) == 8 else c_str
+        tk.Label(
+            card,
+            text=f"Pairing Code: {formatted}",
+            font=("Consolas", 15, "bold"),
+            fg="#38BDF8",
+            bg="#0B132B",
+        ).pack(pady=(10, 2))
+
+        tk.Label(
+            card,
+            text=f"Host: {url}",
+            font=("Segoe UI", 9),
+            fg="#94A3B8",
+            bg="#0B132B",
+        ).pack(pady=(0, 6))
+
+        tk.Label(
+            card,
+            text="Point iPad camera at this screen • Click or press Esc to close",
+            font=("Segoe UI", 8),
+            fg="#64748B",
+            bg="#0B132B",
+        ).pack()
+
+        self.bind("<Escape>", lambda e: self.destroy())
+
+        self.update_idletasks()
+        w = self.winfo_reqwidth()
+        h = self.winfo_reqheight()
+        sw = self.winfo_screenwidth()
+        sh = self.winfo_screenheight()
+        x = (sw - w) // 2
+        y = (sh - h) // 2
+        self.geometry(f"{w}x{h}+{x}+{y}")
+        self.focus_force()
 
 
 # Ensure all threads bind to the interactive 'Default' desktop
@@ -648,7 +734,7 @@ class ControlWindow(tk.Toplevel):
         self.attributes("-topmost", True)
         self.configure(bg="#121218")
         self.resizable(False, False)
-        self.width = 370
+        self.width = 410
         self.height = 465
         self.opened_at = 0.0
         self._drag_x = 0
@@ -884,33 +970,49 @@ class ControlWindow(tk.Toplevel):
         self.qr_card = tk.Frame(
             self.pair_box,
             bg="#0B132B",
-            padx=6,
-            pady=6,
+            padx=8,
+            pady=8,
             highlightthickness=1,
             highlightbackground="#1E293B",
         )
         self.qr_card.pack(fill="x", pady=(0, 6))
 
-        self.lbl_qr_image = tk.Label(self.qr_card, bg="#FFFFFF")
+        self.lbl_qr_image = tk.Label(self.qr_card, bg="#FFFFFF", cursor="hand2")
+        self.lbl_qr_image.bind("<Button-1>", lambda e: self._open_large_qr())
+
         self.lbl_qr_placeholder = tk.Label(
             self.qr_card,
             text="Switch ON to display\npairing QR code",
-            font=("Segoe UI", 8, "bold"),
+            font=("Segoe UI", 9, "bold"),
             fg="#64748B",
             bg="#0B132B",
-            pady=28,
+            pady=36,
         )
         self.lbl_qr_placeholder.pack(fill="x")
 
-        # Sub-hint
+        # Sub-hint row with "Click to enlarge"
+        hint_row = tk.Frame(self.pair_box, bg="#162536")
+        hint_row.pack(fill="x", pady=(0, 4))
+
         self.lbl_qr_hint = tk.Label(
-            self.pair_box,
-            text="📷 Scan with iPad camera to pair instantly without typing",
+            hint_row,
+            text="📷 Scan with iPad camera",
             font=("Segoe UI", 7, "bold"),
             fg="#38BDF8",
             bg="#162536",
         )
-        self.lbl_qr_hint.pack(anchor="w", pady=(0, 4))
+        self.lbl_qr_hint.pack(side="left")
+
+        self.btn_enlarge_qr = tk.Label(
+            hint_row,
+            text="🔍 Click to enlarge QR",
+            font=("Segoe UI", 7, "underline"),
+            fg="#38BDF8",
+            bg="#162536",
+            cursor="hand2",
+        )
+        self.btn_enlarge_qr.pack(side="right")
+        self.btn_enlarge_qr.bind("<Button-1>", lambda e: self._open_large_qr())
 
         # Fallback text details row
         fallback_row = tk.Frame(self.pair_box, bg="#162536")
@@ -1020,11 +1122,11 @@ class ControlWindow(tk.Toplevel):
         self.lbl_info2.pack(anchor="w")
 
         # Footer
-        footer = tk.Frame(inner, bg="#181822")
-        footer.pack(fill="x", side="bottom")
+        self.footer = tk.Frame(inner, bg="#181822")
+        self.footer.pack(fill="x", side="bottom")
 
         btn_hide = tk.Label(
-            footer,
+            self.footer,
             text="Hide to Tray",
             font=("Segoe UI", 8),
             fg="#9CA3AF",
@@ -1037,7 +1139,7 @@ class ControlWindow(tk.Toplevel):
         btn_hide.bind("<Leave>", lambda e: btn_hide.configure(fg="#9CA3AF"))
 
         btn_exit = tk.Label(
-            footer,
+            self.footer,
             text="Exit Application",
             font=("Segoe UI", 8, "underline"),
             fg="#9CA3AF",
@@ -1165,6 +1267,7 @@ class ControlWindow(tk.Toplevel):
 
         if cur == "wifi":
             self.pair_box.pack(fill="x", pady=(0, 10), before=self.fps_box)
+            self.info_box.pack_forget()
             if self.manager.is_running() and self.manager.pair_code:
                 self._update_pairing_display(self.manager.pair_code, self.manager.url)
             elif self.manager.is_running():
@@ -1173,9 +1276,17 @@ class ControlWindow(tk.Toplevel):
                 self._update_pairing_display(None, None, starting=False)
         else:
             self.pair_box.pack_forget()
+            self.info_box.pack(fill="x", pady=(0, 12), before=self.footer)
 
         self._update_fps_visibility()
         self._reanchor_window()
+
+    def _open_large_qr(self):
+        code = self.manager.pair_code
+        url = self.manager.url or f"http://{detect_lan_ip()}:8644"
+        if not code:
+            return
+        LargeQRWindow(self, url, code)
 
     def _update_guidance(self):
         mode = self.mode_var.get()
@@ -1199,9 +1310,9 @@ class ControlWindow(tk.Toplevel):
             self.btn_copy_code.configure(text="Copy", fg="#38BDF8")
             self.btn_copy_url.configure(text="Copy", fg="#38BDF8")
 
-            # Generate QR code for pairing URL
+            # Generate large, crisp 260x260 QR code for pairing URL
             qr_payload = f"{active_url}/?code={c_str}"
-            qr_img = render_qr_image(qr_payload, size=140)
+            qr_img = render_qr_image(qr_payload, size=260)
             if qr_img:
                 self.qr_photo = ImageTk.PhotoImage(qr_img)
                 self.lbl_qr_placeholder.pack_forget()
@@ -1212,13 +1323,13 @@ class ControlWindow(tk.Toplevel):
             self.lbl_pair_status.configure(text="● Starting...", fg="#FBBF24")
             self.lbl_qr_image.pack_forget()
             self.lbl_qr_placeholder.configure(text="Generating pairing\nQR code...", fg="#FBBF24")
-            self.lbl_qr_placeholder.pack(fill="x", pady=20)
+            self.lbl_qr_placeholder.pack(fill="x", pady=28)
         else:
             self.lbl_pair_code.configure(text="Code: -- --  -- --", fg="#64748B")
             self.lbl_pair_status.configure(text="Turn ON to pair", fg="#94A3B8")
             self.lbl_qr_image.pack_forget()
             self.lbl_qr_placeholder.configure(text="Switch ON to display\npairing QR code", fg="#64748B")
-            self.lbl_qr_placeholder.pack(fill="x", pady=20)
+            self.lbl_qr_placeholder.pack(fill="x", pady=28)
 
     def _copy_code(self):
         code = self.manager.pair_code

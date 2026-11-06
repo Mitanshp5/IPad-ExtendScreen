@@ -18,8 +18,6 @@
 @property (nonatomic, strong) UIButton *testButton;
 @property (nonatomic, strong) UIButton *forgetWiFiButton;
 @property (nonatomic, strong) UILabel *cableHelp;
-@property (nonatomic, strong) UILabel *fpsTitle;
-@property (nonatomic, strong) UISegmentedControl *fpsControl;
 @property (nonatomic, strong) UILabel *inputTitle;
 @property (nonatomic, strong) UISwitch *inputSwitch;
 @property (nonatomic, strong) UILabel *showFPSTitle;
@@ -137,12 +135,6 @@
 
     self.cableHelp = [self label:@"USB cable mode needs no password. Connect the cable, then run start-cable-host.cmd on the PC. The PC reaches the app through Apple usbmuxd (Apple Mobile Device Support or libimobiledevice). The listener stays on 127.0.0.1:8765 inside the iPad."];
 
-    self.fpsTitle = [self label:@"Stream rate"];
-    self.fpsControl = [[UISegmentedControl alloc] initWithItems:@[@"15 fps", @"30 fps", @"45 fps", @"60 fps"]];
-    NSInteger fps = [[self storedObjectForKey:PSFPSKey bundled:bundled] integerValue];
-    self.fpsControl.selectedSegmentIndex = fps == 15 ? 0 : (fps == 45 ? 2 : (fps == 60 ? 3 : 1));
-    [self.scroll addSubview:self.fpsControl];
-
     self.inputTitle = [self label:@"Forward touch and keyboard to the PC"];
     self.inputSwitch = [UISwitch new];
     id input = [self storedObjectForKey:PSInputKey bundled:bundled];
@@ -211,10 +203,6 @@
     self.cableHelp.frame = CGRectMake(left, y, width, 90);
     y += 98;
 
-    self.fpsTitle.frame = CGRectMake(left, y, width, 26);
-    self.fpsControl.frame = CGRectMake(left, y + 28, width, 36);
-    y += 74;
-
     self.inputTitle.frame = CGRectMake(left, y, width - 70, 40);
     self.inputSwitch.frame = CGRectMake(CGRectGetMaxX(self.inputTitle.frame) + 12, y + 4, 58, 32);
     y += 48;
@@ -252,40 +240,6 @@
     [self pairDeviceWithAutoDismiss:YES];
 }
 
-- (NSInteger)currentSelectedFPS {
-    if (self.modeControl.selectedSegmentIndex == 1) {
-        switch (self.fpsControl.selectedSegmentIndex) {
-            case 0: return 15;
-            case 2: return 45;
-            case 3: return 60;
-            default: return 30;
-        }
-    } else {
-        return self.fpsControl.selectedSegmentIndex == 0 ? 15 : 30;
-    }
-}
-
-- (void)updateFPSOptionsForCable:(BOOL)cable {
-    NSInteger curFPS = [self currentSelectedFPS];
-    [self.fpsControl removeAllSegments];
-    if (cable) {
-        [self.fpsControl insertSegmentWithTitle:@"15 fps" atIndex:0 animated:NO];
-        [self.fpsControl insertSegmentWithTitle:@"30 fps" atIndex:1 animated:NO];
-        [self.fpsControl insertSegmentWithTitle:@"45 fps" atIndex:2 animated:NO];
-        [self.fpsControl insertSegmentWithTitle:@"60 fps" atIndex:3 animated:NO];
-        self.fpsTitle.text = @"Stream rate (USB Cable)";
-        if (curFPS == 15) self.fpsControl.selectedSegmentIndex = 0;
-        else if (curFPS == 45) self.fpsControl.selectedSegmentIndex = 2;
-        else if (curFPS == 60) self.fpsControl.selectedSegmentIndex = 3;
-        else self.fpsControl.selectedSegmentIndex = 1;
-    } else {
-        [self.fpsControl insertSegmentWithTitle:@"15 fps" atIndex:0 animated:NO];
-        [self.fpsControl insertSegmentWithTitle:@"30 fps (Max)" atIndex:1 animated:NO];
-        self.fpsTitle.text = @"Stream rate (Wi-Fi 30Hz limit)";
-        self.fpsControl.selectedSegmentIndex = curFPS == 15 ? 0 : 1;
-    }
-}
-
 - (void)refreshModeAppearance {
     BOOL cable = self.modeControl.selectedSegmentIndex == 1;
     self.scanQRButton.hidden = cable;
@@ -297,7 +251,6 @@
     self.testButton.enabled = !cable;
     self.forgetWiFiButton.enabled = !cable;
     self.cableHelp.alpha = cable ? 1 : 0.75;
-    [self updateFPSOptionsForCable:cable];
     [self.view setNeedsLayout];
 }
 
@@ -321,8 +274,6 @@
 
     [defaults setObject:server ?: @"" forKey:PSServerURLKey];
     [defaults setInteger:mode forKey:PSModeKey];
-    NSInteger fps = [self currentSelectedFPS];
-    [defaults setInteger:fps forKey:PSFPSKey];
     [defaults setBool:self.inputSwitch.on forKey:PSInputKey];
     [defaults setBool:self.showFPSSwitch.on forKey:PSShowFPSKey];
     self.keyField.text = @"";
@@ -379,7 +330,6 @@
             NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
             [defaults setObject:server forKey:PSServerURLKey];
             [defaults setInteger:PSModeWiFi forKey:PSModeKey];
-            [defaults setInteger:[controller currentSelectedFPS] forKey:PSFPSKey];
             [defaults setBool:controller.showFPSSwitch.on forKey:PSShowFPSKey];
             [defaults synchronize];
             controller.keyField.text = @"";
