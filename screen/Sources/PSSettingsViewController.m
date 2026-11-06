@@ -2,12 +2,14 @@
 #import "PSScreenSettings.h"
 #import "PSConnectionClient.h"
 #import "PSKeychainStore.h"
+#import "PSQRScannerViewController.h"
 
 @interface PSSettingsViewController () <UITextFieldDelegate>
 @property (nonatomic, strong) UIScrollView *scroll;
 @property (nonatomic, strong) UILabel *intro;
 @property (nonatomic, strong) UILabel *modeTitle;
 @property (nonatomic, strong) UISegmentedControl *modeControl;
+@property (nonatomic, strong) UIButton *scanQRButton;
 @property (nonatomic, strong) UILabel *serverTitle;
 @property (nonatomic, strong) UITextField *serverField;
 @property (nonatomic, strong) UILabel *keyTitle;
@@ -102,6 +104,13 @@
                forControlEvents:UIControlEventValueChanged];
     [self.scroll addSubview:self.modeControl];
 
+    self.scanQRButton = [self actionButton:@"📷 Scan PC QR Code to Pair"];
+    self.scanQRButton.backgroundColor = [UIColor colorWithRed:0.02 green:0.52 blue:0.78 alpha:1.0];
+    [self.scanQRButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    self.scanQRButton.titleLabel.font = [UIFont boldSystemFontOfSize:19];
+    self.scanQRButton.layer.cornerRadius = 10;
+    [self.scanQRButton addTarget:self action:@selector(openQRScanner) forControlEvents:UIControlEventTouchUpInside];
+
     self.serverTitle = [self label:@"PC host origin (Wi-Fi)"];
     self.serverField = [self field];
     self.serverField.keyboardType = UIKeyboardTypeURL;
@@ -168,29 +177,118 @@
     [super viewDidLayoutSubviews];
     CGFloat width = MIN(self.view.bounds.size.width - 48, 680);
     CGFloat left = (self.view.bounds.size.width - width) / 2;
-    self.intro.frame = CGRectMake(left, 20, width, 72);
-    self.modeTitle.frame = CGRectMake(left, 104, width, 26);
-    self.modeControl.frame = CGRectMake(left, 132, width, 36);
-    self.serverTitle.frame = CGRectMake(left, 184, width, 26);
-    self.serverField.frame = CGRectMake(left, 212, width, 48);
-    self.keyTitle.frame = CGRectMake(left, 276, width, 26);
-    self.keyField.frame = CGRectMake(left, 304, width, 48);
-    self.pairButton.frame = CGRectMake(left, 364, width, 44);
-    self.testButton.frame = CGRectMake(left, 414, width, 44);
-    self.resultLabel.frame = CGRectMake(left, 468, width, 82);
-    self.forgetWiFiButton.frame = CGRectMake(left, 558, width, 40);
-    self.cableHelp.frame = CGRectMake(left, 610, width, 110);
-    self.fpsTitle.frame = CGRectMake(left, 736, width, 26);
-    self.fpsControl.frame = CGRectMake(left, 764, width, 36);
-    self.inputTitle.frame = CGRectMake(left, 820, width - 70, 40);
-    self.inputSwitch.frame = CGRectMake(CGRectGetMaxX(self.inputTitle.frame) + 12, 824, 58, 32);
-    self.showFPSTitle.frame = CGRectMake(left, 874, width - 70, 40);
-    self.showFPSSwitch.frame = CGRectMake(CGRectGetMaxX(self.showFPSTitle.frame) + 12, 878, 58, 32);
-    self.scroll.contentSize = CGSizeMake(self.view.bounds.size.width, 930);
+    self.intro.frame = CGRectMake(left, 20, width, 54);
+    self.modeTitle.frame = CGRectMake(left, 84, width, 26);
+    self.modeControl.frame = CGRectMake(left, 112, width, 36);
+
+    CGFloat y = 160;
+    if (self.modeControl.selectedSegmentIndex == 0) {
+        // Wi-Fi mode: prominent Scan QR button
+        self.scanQRButton.frame = CGRectMake(left, y, width, 50);
+        y += 62;
+    } else {
+        self.scanQRButton.frame = CGRectZero;
+    }
+
+    self.serverTitle.frame = CGRectMake(left, y, width, 26);
+    self.serverField.frame = CGRectMake(left, y + 28, width, 44);
+    y += 82;
+
+    self.keyTitle.frame = CGRectMake(left, y, width, 26);
+    self.keyField.frame = CGRectMake(left, y + 28, width, 44);
+    y += 82;
+
+    self.pairButton.frame = CGRectMake(left, y, width, 44);
+    self.testButton.frame = CGRectMake(left, y + 50, width, 44);
+    y += 104;
+
+    self.resultLabel.frame = CGRectMake(left, y, width, 70);
+    y += 78;
+
+    self.forgetWiFiButton.frame = CGRectMake(left, y, width, 40);
+    y += 48;
+
+    self.cableHelp.frame = CGRectMake(left, y, width, 90);
+    y += 98;
+
+    self.fpsTitle.frame = CGRectMake(left, y, width, 26);
+    self.fpsControl.frame = CGRectMake(left, y + 28, width, 36);
+    y += 74;
+
+    self.inputTitle.frame = CGRectMake(left, y, width - 70, 40);
+    self.inputSwitch.frame = CGRectMake(CGRectGetMaxX(self.inputTitle.frame) + 12, y + 4, 58, 32);
+    y += 48;
+
+    // Show frame rate toggle button (KEPT)
+    self.showFPSTitle.frame = CGRectMake(left, y, width - 70, 40);
+    self.showFPSSwitch.frame = CGRectMake(CGRectGetMaxX(self.showFPSTitle.frame) + 12, y + 4, 58, 32);
+    y += 56;
+
+    self.scroll.contentSize = CGSizeMake(self.view.bounds.size.width, y + 40);
+}
+
+- (void)openQRScanner {
+    PSQRScannerViewController *scanner = [PSQRScannerViewController new];
+    __weak PSSettingsViewController *weakSelf = self;
+    scanner.scanHandler = ^(NSString *serverURL, NSString *pairingCode) {
+        PSSettingsViewController *controller = weakSelf;
+        if (controller) {
+            [controller handleScannedServerURL:serverURL code:pairingCode];
+        }
+    };
+    UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:scanner];
+    nav.navigationBar.barStyle = UIBarStyleBlack;
+    nav.navigationBar.barTintColor = [UIColor colorWithWhite:0.08 alpha:1];
+    nav.navigationBar.tintColor = [UIColor colorWithRed:0.40 green:0.86 blue:0.82 alpha:1];
+    nav.navigationBar.translucent = NO;
+    [self presentViewController:nav animated:YES completion:nil];
+}
+
+- (void)handleScannedServerURL:(NSString *)serverURL code:(NSString *)code {
+    self.serverField.text = serverURL;
+    self.keyField.text = code;
+    self.modeControl.selectedSegmentIndex = 0;
+    [self refreshModeAppearance];
+    [self pairDeviceWithAutoDismiss:YES];
+}
+
+- (NSInteger)currentSelectedFPS {
+    if (self.modeControl.selectedSegmentIndex == 1) {
+        switch (self.fpsControl.selectedSegmentIndex) {
+            case 0: return 15;
+            case 2: return 45;
+            case 3: return 60;
+            default: return 30;
+        }
+    } else {
+        return self.fpsControl.selectedSegmentIndex == 0 ? 15 : 30;
+    }
+}
+
+- (void)updateFPSOptionsForCable:(BOOL)cable {
+    NSInteger curFPS = [self currentSelectedFPS];
+    [self.fpsControl removeAllSegments];
+    if (cable) {
+        [self.fpsControl insertSegmentWithTitle:@"15 fps" atIndex:0 animated:NO];
+        [self.fpsControl insertSegmentWithTitle:@"30 fps" atIndex:1 animated:NO];
+        [self.fpsControl insertSegmentWithTitle:@"45 fps" atIndex:2 animated:NO];
+        [self.fpsControl insertSegmentWithTitle:@"60 fps" atIndex:3 animated:NO];
+        self.fpsTitle.text = @"Stream rate (USB Cable)";
+        if (curFPS == 15) self.fpsControl.selectedSegmentIndex = 0;
+        else if (curFPS == 45) self.fpsControl.selectedSegmentIndex = 2;
+        else if (curFPS == 60) self.fpsControl.selectedSegmentIndex = 3;
+        else self.fpsControl.selectedSegmentIndex = 1;
+    } else {
+        [self.fpsControl insertSegmentWithTitle:@"15 fps" atIndex:0 animated:NO];
+        [self.fpsControl insertSegmentWithTitle:@"30 fps (Max)" atIndex:1 animated:NO];
+        self.fpsTitle.text = @"Stream rate (Wi-Fi 30Hz limit)";
+        self.fpsControl.selectedSegmentIndex = curFPS == 15 ? 0 : 1;
+    }
 }
 
 - (void)refreshModeAppearance {
     BOOL cable = self.modeControl.selectedSegmentIndex == 1;
+    self.scanQRButton.hidden = cable;
     self.serverTitle.alpha = cable ? 0.45 : 1;
     self.serverField.enabled = !cable;
     self.keyTitle.alpha = cable ? 0.45 : 1;
@@ -199,6 +297,8 @@
     self.testButton.enabled = !cable;
     self.forgetWiFiButton.enabled = !cable;
     self.cableHelp.alpha = cable ? 1 : 0.75;
+    [self updateFPSOptionsForCable:cable];
+    [self.view setNeedsLayout];
 }
 
 - (void)save {
@@ -221,9 +321,7 @@
 
     [defaults setObject:server ?: @"" forKey:PSServerURLKey];
     [defaults setInteger:mode forKey:PSModeKey];
-    NSInteger fps = self.fpsControl.selectedSegmentIndex == 0 ? 15 :
-                    (self.fpsControl.selectedSegmentIndex == 2 ? 45 :
-                    (self.fpsControl.selectedSegmentIndex == 3 ? 60 : 30));
+    NSInteger fps = [self currentSelectedFPS];
     [defaults setInteger:fps forKey:PSFPSKey];
     [defaults setBool:self.inputSwitch.on forKey:PSInputKey];
     [defaults setBool:self.showFPSSwitch.on forKey:PSShowFPSKey];
@@ -244,6 +342,10 @@
 }
 
 - (void)pairDevice {
+    [self pairDeviceWithAutoDismiss:NO];
+}
+
+- (void)pairDeviceWithAutoDismiss:(BOOL)autoDismiss {
     if (self.modeControl.selectedSegmentIndex == 1) {
         [self showResult:@"USB cable mode needs no pairing code. Plug in the cable and run start-cable-host.cmd on the PC."
              alertTitle:nil];
@@ -256,7 +358,7 @@
     NSString *server = [self.serverField.text stringByTrimmingCharactersInSet:
         [NSCharacterSet whitespaceAndNewlineCharacterSet]];
     if (code.length != 8) {
-        [self showResult:@"Enter the eight-digit code printed by screen-host.py on the PC."
+        [self showResult:@"Enter the eight-digit code printed by screen-host.py on the PC, or scan the PC QR code."
              alertTitle:@"Pairing Code Needed"];
         return;
     }
@@ -274,9 +376,19 @@
         [controller.pairButton setTitle:@"Pair over Wi-Fi" forState:UIControlStateNormal];
         controller.connectionClient = nil;
         if (paired) {
-            [[NSUserDefaults standardUserDefaults] setObject:server forKey:PSServerURLKey];
-            [[NSUserDefaults standardUserDefaults] setInteger:PSModeWiFi forKey:PSModeKey];
+            NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+            [defaults setObject:server forKey:PSServerURLKey];
+            [defaults setInteger:PSModeWiFi forKey:PSModeKey];
+            [defaults setInteger:[controller currentSelectedFPS] forKey:PSFPSKey];
+            [defaults setBool:controller.showFPSSwitch.on forKey:PSShowFPSKey];
+            [defaults synchronize];
             controller.keyField.text = @"";
+            if (autoDismiss) {
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                    [controller.navigationController popViewControllerAnimated:YES];
+                });
+                return;
+            }
         }
         [controller showResult:message alertTitle:paired ? @"Wi-Fi Paired" : @"Wi-Fi Pairing Failed"];
     }];

@@ -29,4 +29,28 @@
     [self.window makeKeyAndVisible];
     return YES;
 }
+
+- (BOOL)application:(UIApplication *)application openURL:(NSURL *)url
+  sourceApplication:(NSString *)sourceApplication annotation:(id)annotation {
+    if (!url) return NO;
+    if ([url.scheme.lowercaseString isEqualToString:@"extendscreen"]) {
+        NSURLComponents *comp = [NSURLComponents componentsWithURL:url resolvingAgainstBaseURL:NO];
+        NSString *host = nil;
+        NSString *code = nil;
+        for (NSURLQueryItem *item in comp.queryItems) {
+            if ([item.name.lowercaseString isEqualToString:@"host"]) host = item.value;
+            else if ([item.name.lowercaseString isEqualToString:@"code"]) code = item.value;
+        }
+        if (host.length && code.length) {
+            UINavigationController *nav = (UINavigationController *)self.window.rootViewController;
+            if ([nav isKindOfClass:[UINavigationController class]] &&
+                [nav.viewControllers.firstObject isKindOfClass:[PSScreenViewController class]]) {
+                PSScreenViewController *screen = (PSScreenViewController *)nav.viewControllers.firstObject;
+                [screen pairWithScannedServer:host code:code];
+            }
+            return YES;
+        }
+    }
+    return NO;
+}
 @end

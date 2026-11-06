@@ -1,6 +1,8 @@
 #import "PSScreenViewController.h"
 #import "PSSettingsViewController.h"
 #import "PSKeyboardViewController.h"
+#import "PSQRScannerViewController.h"
+#import "PSConnectionClient.h"
 #import "PSStreamClient.h"
 #import "PSInputClient.h"
 #import "PSCableServer.h"
@@ -23,6 +25,7 @@ static const CGFloat PSChromeHotZoneHeight = 140.0;
 @property (nonatomic, strong) UILabel *statusLabel;
 @property (nonatomic, strong) UIButton *settingsButton;
 @property (nonatomic, strong) UIButton *keyboardButton;
+@property (nonatomic, strong) UIButton *qrButton;
 @property (nonatomic, strong) UILabel *fpsLabel;
 @property (nonatomic, strong) PSStreamClient *stream;
 @property (nonatomic, strong) PSInputClient *input;
@@ -45,6 +48,7 @@ static const CGFloat PSChromeHotZoneHeight = 140.0;
 @property (nonatomic) BOOL decoding;
 @property (nonatomic) BOOL dragging;
 @property (nonatomic, strong) NSData *pendingFrame;
+@property (nonatomic) NSUInteger pendingSequence;
 @property (nonatomic) NSUInteger reconnectAttempt;
 @property (nonatomic) NSUInteger framesThisSecond;
 @property (nonatomic) NSTimeInterval lastMoveSent;
@@ -105,6 +109,8 @@ static const CGFloat PSChromeHotZoneHeight = 140.0;
 
     self.settingsButton = [self chromeButton:@"\u2699" label:@"Settings"];
     [self.settingsButton addTarget:self action:@selector(openSettings) forControlEvents:UIControlEventTouchUpInside];
+    self.qrButton = [self chromeButton:@"📷" label:@"Scan PC QR Code to Pair"];
+    [self.qrButton addTarget:self action:@selector(openQRScannerDirect) forControlEvents:UIControlEventTouchUpInside];
     self.keyboardButton = [self chromeButton:@"\u2328" label:@"PC keyboard"];
     [self.keyboardButton addTarget:self action:@selector(openKeyboard) forControlEvents:UIControlEventTouchUpInside];
 
@@ -185,7 +191,8 @@ static const CGFloat PSChromeHotZoneHeight = 140.0;
     CGFloat button = 44;
     CGFloat margin = 16;
     self.settingsButton.frame = CGRectMake(width - button - margin, margin, button, button);
-    self.keyboardButton.frame = CGRectMake(width - button - margin, margin + button + 10, button, button);
+    self.qrButton.frame = CGRectMake(width - button - margin, margin + button + 10, button, button);
+    self.keyboardButton.frame = CGRectMake(width - button - margin, margin + (button + 10) * 2, button, button);
     self.fpsLabel.frame = CGRectMake(margin, height - 30, 92, 21);
     if (!self.statusLabel.hidden) {
         CGFloat maxWidth = MIN(680, MAX(240, width - 120));
@@ -268,6 +275,7 @@ static const CGFloat PSChromeHotZoneHeight = 140.0;
 
     if (mode == PSModeCable) {
         self.cableMode = YES;
+        self.qrButton.hidden = YES;
         self.acceptFrames = YES;
         self.connecting = YES;
         self.cableServer.delegate = self;
@@ -280,8 +288,9 @@ static const CGFloat PSChromeHotZoneHeight = 140.0;
     }
 
     self.cableMode = NO;
+    self.qrButton.hidden = NO;
     if (!server.length || status != errSecSuccess || !token.length) {
-        [self setStatus:@"Open Settings to pair this iPad with the PC host."];
+        [self setStatus:@"Tap 📷 to scan the pairing QR code on your PC,\nor open Settings to pair manually."];
         return;
     }
     [self.input configureWithServerURL:server token:token enabled:inputEnabled];
@@ -295,7 +304,7 @@ static const CGFloat PSChromeHotZoneHeight = 140.0;
         __weak PSScreenViewController *weakSelf = self;
         self.stream.frameHandler = ^(NSData *jpeg, NSUInteger sequence) {
             PSScreenViewController *controller = weakSelf;
-            if (controller) [controller receiveFrame:jpeg];
+            if (controller) [controller receiveFrame:jpeg sequence:sequence];
         };
         self.stream.statusHandler = ^(BOOL streaming, NSString *message, NSInteger httpStatus) {
             PSScreenViewController *controller = weakSelf;
@@ -361,7 +370,7 @@ static const CGFloat PSChromeHotZoneHeight = 140.0;
     if (!self.cableMode || !self.acceptFrames) {
         return;
     }
-    [self receiveFrame:jpeg];
+    [self receiveFrame:jpeg sequence:0];
 }
 
 - (void)scheduleReconnect {
@@ -396,10 +405,11 @@ static const CGFloat PSChromeHotZoneHeight = 140.0;
     [UIApplication sharedApplication].idleTimerDisabled = NO;
 }
 
-- (void)receiveFrame:(NSData *)jpeg {
+- (void)receiveFrame:(NSData *)jpeg sequence:(NSUInteger)sequence {
     if (!self.acceptFrames || !jpeg.length) return;
     if (self.decoding) {
         self.pendingFrame = jpeg;
+        self.pendingSequence = sequence;
         return;
     }
     self.decoding = YES;
@@ -420,12 +430,17 @@ static const CGFloat PSChromeHotZoneHeight = 140.0;
                     controller.imageView.layer.contents = (__bridge id)cgImage;
                     [CATransaction commit];
                     controller.framesThisSecond++;
+                    if (sequence > 0) {
+                        [controller.stream sendACK:sequence];
+                    }
                 }
                 if (cgImage) CGImageRelease(cgImage);
                 controller.decoding = NO;
                 NSData *pending = controller.pendingFrame;
+                NSUInteger pendingSeq = controller.pendingSequence;
                 controller.pendingFrame = nil;
-                if (pending) [controller receiveFrame:pending];
+                controller.pendingSequence = 0;
+                if (pending) [controller receiveFrame:pending sequence:pendingSeq];
             });
         }
     });
@@ -470,7 +485,10 @@ static const CGFloat PSChromeHotZoneHeight = 140.0;
 - (void)sendInputEvent:(NSDictionary *)event {
     if (!event || !self.inputEnabled) return;
     if (self.cableMode) [self.cableServer sendEvent:event];
-    else [self.input sendEvent:event];
+    else {
+        [self.stream sendInputEvent:event];
+        [self.input sendEvent:event];
+    }
 }
 
 - (void)sendPointer:(NSString *)type point:(CGPoint)point clamp:(BOOL)clamp {
@@ -486,10 +504,12 @@ static const CGFloat PSChromeHotZoneHeight = 140.0;
     self.chromeHidden = NO;
     self.settingsButton.userInteractionEnabled = YES;
     self.keyboardButton.userInteractionEnabled = YES;
+    if (!self.cableMode) self.qrButton.userInteractionEnabled = YES;
     [self setNeedsStatusBarAppearanceUpdate];
     [UIView animateWithDuration:0.22 animations:^{
         self.settingsButton.alpha = 1.0;
         self.keyboardButton.alpha = 1.0;
+        if (!self.cableMode) self.qrButton.alpha = 1.0;
     }];
     [self scheduleChromeHide];
 }
@@ -515,10 +535,12 @@ static const CGFloat PSChromeHotZoneHeight = 140.0;
     self.chromeHidden = YES;
     self.settingsButton.userInteractionEnabled = NO;
     self.keyboardButton.userInteractionEnabled = NO;
+    self.qrButton.userInteractionEnabled = NO;
     [self setNeedsStatusBarAppearanceUpdate];
     [UIView animateWithDuration:0.30 animations:^{
         self.settingsButton.alpha = 0.0;
         self.keyboardButton.alpha = 0.0;
+        self.qrButton.alpha = 0.0;
     }];
 }
 
@@ -583,6 +605,46 @@ static const CGFloat PSChromeHotZoneHeight = 140.0;
     dy = MAX(-2400, MIN(2400, dy));
     [gesture setTranslation:CGPointZero inView:self.view];
     [self sendInputEvent:@{@"type": @"scroll", @"dy": @(dy)}];
+}
+
+- (void)openQRScannerDirect {
+    self.suspendForSettings = YES;
+    [self stopEverything];
+    PSQRScannerViewController *scanner = [PSQRScannerViewController new];
+    __weak PSScreenViewController *weakSelf = self;
+    scanner.scanHandler = ^(NSString *serverURL, NSString *pairingCode) {
+        PSScreenViewController *controller = weakSelf;
+        if (controller) {
+            [controller pairWithScannedServer:serverURL code:pairingCode];
+        }
+    };
+    UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:scanner];
+    nav.navigationBar.barStyle = UIBarStyleBlack;
+    nav.navigationBar.barTintColor = [UIColor colorWithWhite:0.08 alpha:1];
+    nav.navigationBar.tintColor = [UIColor colorWithRed:0.40 green:0.86 blue:0.82 alpha:1];
+    nav.navigationBar.translucent = NO;
+    [self presentViewController:nav animated:YES completion:nil];
+}
+
+- (void)pairWithScannedServer:(NSString *)server code:(NSString *)code {
+    [self setStatus:@"Pairing with PC host..."];
+    PSConnectionClient *client = [PSConnectionClient new];
+    __weak PSScreenViewController *weakSelf = self;
+    [client pairWithCode:code serverURL:server completion:^(BOOL paired, NSString *message) {
+        PSScreenViewController *controller = weakSelf;
+        if (!controller) return;
+        if (paired) {
+            NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+            [defaults setObject:server forKey:PSServerURLKey];
+            [defaults setInteger:PSModeWiFi forKey:PSModeKey];
+            [defaults synchronize];
+            [controller setStatus:@"Paired! Connecting to desktop..."];
+            controller.suspendForSettings = NO;
+            [controller activateIfNeeded];
+        } else {
+            [controller setStatus:message.length ? message : @"Pairing failed. Try scanning again."];
+        }
+    }];
 }
 
 - (void)openSettings {

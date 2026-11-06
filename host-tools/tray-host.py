@@ -27,6 +27,38 @@ from typing import Optional
 from PIL import Image, ImageTk, ImageDraw, ImageFilter
 import pystray
 
+def render_qr_image(data: str, size: int = 140) -> Optional[Image.Image]:
+    """Generates a clean black & white QR code PIL image."""
+    try:
+        import qrcode
+        qr = qrcode.QRCode(
+            version=1,
+            error_correction=qrcode.constants.ERROR_CORRECT_M,
+            box_size=4,
+            border=2,
+        )
+        qr.add_data(data)
+        qr.make(fit=True)
+        img = qr.make_image(fill_color="black", back_color="white").convert("RGB")
+        return img.resize((size, size), Image.Resampling.NEAREST)
+    except Exception:
+        pass
+
+    try:
+        import cv2
+        import numpy as np
+        enc = cv2.QRCodeEncoder.create()
+        mat = enc.encode(data)
+        border = 2
+        padded = np.pad(mat, pad_width=border, mode='constant', constant_values=255)
+        img = Image.fromarray(padded).convert('RGB')
+        return img.resize((size, size), Image.Resampling.NEAREST)
+    except Exception:
+        pass
+
+    return None
+
+
 # Ensure all threads bind to the interactive 'Default' desktop
 user32 = ctypes.windll.user32
 kernel32 = ctypes.windll.kernel32
@@ -625,6 +657,7 @@ class ControlWindow(tk.Toplevel):
         self.fps_var = tk.StringVar(value="45")
         self.fps_buttons = {}
         self.mode_tiles = {}
+        self.qr_photo: Optional[ImageTk.PhotoImage] = None
 
         self.withdraw()
 
@@ -832,7 +865,7 @@ class ControlWindow(tk.Toplevel):
 
         tk.Label(
             pair_header,
-            text="📶 WI-FI PAIRING CODE",
+            text="📶 WI-FI PAIRING QR CODE",
             font=("Segoe UI", 8, "bold"),
             fg="#38BDF8",
             bg="#162536",
@@ -847,72 +880,83 @@ class ControlWindow(tk.Toplevel):
         )
         self.lbl_pair_status.pack(side="right")
 
-        # Code display box
-        code_card = tk.Frame(
+        # QR Code Display Container
+        self.qr_card = tk.Frame(
             self.pair_box,
             bg="#0B132B",
-            padx=10,
+            padx=6,
             pady=6,
             highlightthickness=1,
             highlightbackground="#1E293B",
         )
-        code_card.pack(fill="x", pady=(0, 6))
+        self.qr_card.pack(fill="x", pady=(0, 6))
 
-        self.lbl_pair_code = tk.Label(
-            code_card,
-            text="-- --  -- --",
-            font=("Consolas", 15, "bold"),
+        self.lbl_qr_image = tk.Label(self.qr_card, bg="#FFFFFF")
+        self.lbl_qr_placeholder = tk.Label(
+            self.qr_card,
+            text="Switch ON to display\npairing QR code",
+            font=("Segoe UI", 8, "bold"),
             fg="#64748B",
             bg="#0B132B",
+            pady=28,
         )
-        self.lbl_pair_code.pack(side="left", expand=True)
+        self.lbl_qr_placeholder.pack(fill="x")
+
+        # Sub-hint
+        self.lbl_qr_hint = tk.Label(
+            self.pair_box,
+            text="📷 Scan with iPad camera to pair instantly without typing",
+            font=("Segoe UI", 7, "bold"),
+            fg="#38BDF8",
+            bg="#162536",
+        )
+        self.lbl_qr_hint.pack(anchor="w", pady=(0, 4))
+
+        # Fallback text details row
+        fallback_row = tk.Frame(self.pair_box, bg="#162536")
+        fallback_row.pack(fill="x", pady=(2, 0))
+
+        self.lbl_pair_code = tk.Label(
+            fallback_row,
+            text="Code: -- --  -- --",
+            font=("Consolas", 8, "bold"),
+            fg="#94A3B8",
+            bg="#162536",
+        )
+        self.lbl_pair_code.pack(side="left")
 
         self.btn_copy_code = tk.Label(
-            code_card,
-            text="Copy Code",
-            font=("Segoe UI", 8, "bold"),
-            fg="#FFFFFF",
-            bg="#0284C7",
-            padx=8,
-            pady=4,
+            fallback_row,
+            text="Copy",
+            font=("Segoe UI", 7, "underline"),
+            fg="#38BDF8",
+            bg="#162536",
             cursor="hand2",
+            padx=4,
         )
-        self.btn_copy_code.pack(side="right")
+        self.btn_copy_code.pack(side="left", padx=(2, 8))
         self.btn_copy_code.bind("<Button-1>", lambda e: self._copy_code())
 
-        # URL row
-        url_frame = tk.Frame(self.pair_box, bg="#162536")
-        url_frame.pack(fill="x", pady=(0, 4))
-
         self.lbl_pair_url = tk.Label(
-            url_frame,
+            fallback_row,
             text=f"Host: http://{detect_lan_ip()}:8644",
-            font=("Segoe UI", 8),
-            fg="#CBD5E1",
+            font=("Segoe UI", 7),
+            fg="#94A3B8",
             bg="#162536",
         )
         self.lbl_pair_url.pack(side="left")
 
         self.btn_copy_url = tk.Label(
-            url_frame,
-            text="Copy URL",
-            font=("Segoe UI", 8, "underline"),
+            fallback_row,
+            text="Copy",
+            font=("Segoe UI", 7, "underline"),
             fg="#38BDF8",
             bg="#162536",
             cursor="hand2",
+            padx=4,
         )
-        self.btn_copy_url.pack(side="right")
+        self.btn_copy_url.pack(side="left", padx=(2, 0))
         self.btn_copy_url.bind("<Button-1>", lambda e: self._copy_url())
-
-        # Sub-hint
-        lbl_hint = tk.Label(
-            self.pair_box,
-            text="Enter this URL & code on your iPad when prompted.",
-            font=("Segoe UI", 7),
-            fg="#94A3B8",
-            bg="#162536",
-        )
-        lbl_hint.pack(anchor="w")
 
         # Framerate (FPS) Control Row
         self.fps_box = tk.Frame(inner, bg="#1F1F2C", padx=12, pady=8, highlightthickness=1, highlightbackground="#2C2C3C")
@@ -948,10 +992,10 @@ class ControlWindow(tk.Toplevel):
         self.entry_fps.bind("<Return>", lambda e: self._on_custom_fps())
         self.entry_fps.bind("<FocusOut>", lambda e: self._on_custom_fps())
 
-        lbl_fps_unit = tk.Label(self.fps_box, text="FPS (5-60)", font=("Segoe UI", 7), fg="#6B7280", bg="#1F1F2C")
-        lbl_fps_unit.pack(side="left", padx=(4, 0))
+        self.lbl_fps_unit = tk.Label(self.fps_box, text="FPS (5-60)", font=("Segoe UI", 7), fg="#6B7280", bg="#1F1F2C")
+        self.lbl_fps_unit.pack(side="left", padx=(4, 0))
 
-        self._update_fps_buttons()
+        self._update_fps_visibility()
 
         # Status / Guidance Box
         self.info_box = tk.Frame(inner, bg="#1F1F2C", padx=10, pady=8, highlightthickness=1, highlightbackground="#2A2A38")
@@ -1023,11 +1067,15 @@ class ControlWindow(tk.Toplevel):
     def get_fps(self) -> int:
         try:
             val = int(self.fps_var.get().strip())
+            if self.mode_var.get() == "wifi":
+                return 30
             return max(5, min(60, val))
         except Exception:
-            return 45
+            return 30 if self.mode_var.get() == "wifi" else 45
 
     def _select_fps(self, val: str):
+        if self.mode_var.get() == "wifi" and val != "30":
+            return
         self.fps_var.set(val)
         self._update_fps_buttons()
         if self.manager.is_running():
@@ -1035,6 +1083,8 @@ class ControlWindow(tk.Toplevel):
 
     def _on_custom_fps(self):
         val = self.get_fps()
+        if self.mode_var.get() == "wifi":
+            val = 30
         self.fps_var.set(str(val))
         self._update_fps_buttons()
         if self.manager.is_running():
@@ -1047,6 +1097,25 @@ class ControlWindow(tk.Toplevel):
                 btn.configure(bg="#0284C7", fg="#FFFFFF")
             else:
                 btn.configure(bg="#282838", fg="#9CA3AF")
+
+    def _update_fps_visibility(self):
+        mode = self.mode_var.get()
+        if mode == "wifi":
+            self.fps_var.set("30")
+            for val in ["45", "60"]:
+                if val in self.fps_buttons:
+                    self.fps_buttons[val].pack_forget()
+            if "30" in self.fps_buttons:
+                self.fps_buttons["30"].pack(side="left", padx=1)
+            self.entry_fps.pack_forget()
+            self.lbl_fps_unit.configure(text="FPS (30Hz Wi-Fi limit)")
+        else:
+            for val in ["30", "45", "60"]:
+                if val in self.fps_buttons:
+                    self.fps_buttons[val].pack(side="left", padx=1)
+            self.entry_fps.pack(side="left", padx=(8, 0))
+            self.lbl_fps_unit.configure(text="FPS (5-60)")
+        self._update_fps_buttons()
 
     def _on_fps_changed(self):
         mode = self.mode_var.get()
@@ -1105,37 +1174,51 @@ class ControlWindow(tk.Toplevel):
         else:
             self.pair_box.pack_forget()
 
+        self._update_fps_visibility()
         self._reanchor_window()
 
     def _update_guidance(self):
         mode = self.mode_var.get()
         if mode == "cable":
             self.lbl_info1.configure(text="💡 USB Cable: Connect your iPad via Lightning/USB-C.")
-            self.lbl_info2.configure(text="   No pairing required. Near-zero latency streaming.")
+            self.lbl_info2.configure(text="   No pairing required. 60 FPS ultra-low latency.")
         else:
             self.lbl_info1.configure(text="📶 Wi-Fi: Connect iPad to the same Wi-Fi network.")
-            self.lbl_info2.configure(text="   Open iPad app and enter pairing code & host URL.")
+            self.lbl_info2.configure(text="   Scan the QR code with iPad camera to pair instantly.")
 
     def _update_pairing_display(self, code: Optional[str], url: Optional[str], starting: bool = False):
-        if url:
-            self.lbl_pair_url.configure(text=f"Host: {url}")
-        else:
-            self.lbl_pair_url.configure(text=f"Host: http://{detect_lan_ip()}:8644")
+        lan_ip = detect_lan_ip()
+        active_url = url or f"http://{lan_ip}:8644"
+        self.lbl_pair_url.configure(text=f"Host: {active_url}")
 
         if code:
             c_str = str(code)
             formatted = f"{c_str[:4]}  {c_str[4:]}" if len(c_str) == 8 else c_str
-            self.lbl_pair_code.configure(text=formatted, fg="#38BDF8")
+            self.lbl_pair_code.configure(text=f"Code: {formatted}", fg="#38BDF8")
             self.lbl_pair_status.configure(text="● Ready to Pair", fg="#34D399")
-            self.btn_copy_code.configure(text="Copy Code", bg="#0284C7", fg="#FFFFFF")
+            self.btn_copy_code.configure(text="Copy", fg="#38BDF8")
+            self.btn_copy_url.configure(text="Copy", fg="#38BDF8")
+
+            # Generate QR code for pairing URL
+            qr_payload = f"{active_url}/?code={c_str}"
+            qr_img = render_qr_image(qr_payload, size=140)
+            if qr_img:
+                self.qr_photo = ImageTk.PhotoImage(qr_img)
+                self.lbl_qr_placeholder.pack_forget()
+                self.lbl_qr_image.configure(image=self.qr_photo)
+                self.lbl_qr_image.pack(pady=4)
         elif starting or (self.manager.is_running() and self.mode_var.get() == "wifi"):
-            self.lbl_pair_code.configure(text="GENERATING...", fg="#FBBF24")
+            self.lbl_pair_code.configure(text="Code: GENERATING...", fg="#FBBF24")
             self.lbl_pair_status.configure(text="● Starting...", fg="#FBBF24")
-            self.btn_copy_code.configure(text="Copy Code", bg="#334155", fg="#94A3B8")
+            self.lbl_qr_image.pack_forget()
+            self.lbl_qr_placeholder.configure(text="Generating pairing\nQR code...", fg="#FBBF24")
+            self.lbl_qr_placeholder.pack(fill="x", pady=20)
         else:
-            self.lbl_pair_code.configure(text="-- --  -- --", fg="#64748B")
+            self.lbl_pair_code.configure(text="Code: -- --  -- --", fg="#64748B")
             self.lbl_pair_status.configure(text="Turn ON to pair", fg="#94A3B8")
-            self.btn_copy_code.configure(text="Copy Code", bg="#334155", fg="#94A3B8")
+            self.lbl_qr_image.pack_forget()
+            self.lbl_qr_placeholder.configure(text="Switch ON to display\npairing QR code", fg="#64748B")
+            self.lbl_qr_placeholder.pack(fill="x", pady=20)
 
     def _copy_code(self):
         code = self.manager.pair_code
@@ -1143,15 +1226,15 @@ class ControlWindow(tk.Toplevel):
             return
         self.clipboard_clear()
         self.clipboard_append(code)
-        self.btn_copy_code.configure(text="✓ Copied!", bg="#10B981")
-        self.after(1400, lambda: self.btn_copy_code.configure(text="Copy Code", bg="#0284C7"))
+        self.btn_copy_code.configure(text="✓ Copied!", fg="#10B981")
+        self.after(1400, lambda: self.btn_copy_code.configure(text="Copy", fg="#38BDF8"))
 
     def _copy_url(self):
         url = self.manager.url or f"http://{detect_lan_ip()}:8644"
         self.clipboard_clear()
         self.clipboard_append(url)
         self.btn_copy_url.configure(text="✓ Copied!", fg="#10B981")
-        self.after(1400, lambda: self.btn_copy_url.configure(text="Copy URL", fg="#38BDF8"))
+        self.after(1400, lambda: self.btn_copy_url.configure(text="Copy", fg="#38BDF8"))
 
     def _reanchor_window(self):
         if not self.winfo_viewable():

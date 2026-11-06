@@ -1499,6 +1499,52 @@ class ScreenRequestHandler(BaseHTTPRequestHandler):
         if path == "/stream":
             self._stream()
             return
+        if path == "/raw":
+            self._raw_stream()
+            return
+        if path in ("", "/", "/pair"):
+            parsed = urlsplit(self.path)
+            query = parse_qs(parsed.query)
+            code = query.get("code", [""])[0]
+            host_url = f"http://{self.host.config.bind}:{self.host.config.port}"
+            app_url = f"extendscreen://pair?host={host_url}&code={code}"
+            html = f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ExtendScreen</title>
+<style>
+body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f172a; color: #f8fafc; text-align: center; padding: 40px 20px; }}
+.card {{ background: #1e293b; border-radius: 16px; padding: 24px; max-width: 360px; margin: 0 auto; box-shadow: 0 4px 20px rgba(0,0,0,0.5); }}
+h1 {{ font-size: 20px; margin-bottom: 8px; color: #38bdf8; }}
+p {{ font-size: 14px; color: #94a3b8; }}
+.btn {{ display: inline-block; background: #0284c7; color: #fff; text-decoration: none; font-weight: bold; padding: 12px 24px; border-radius: 8px; margin-top: 16px; font-size: 16px; }}
+.code {{ font-family: monospace; font-size: 24px; letter-spacing: 3px; color: #38bdf8; margin: 12px 0; font-weight: bold; }}
+</style>
+<script>
+window.onload = function() {{
+    window.location.href = "{app_url}";
+}};
+</script>
+</head>
+<body>
+<div class="card">
+<h1>ExtendScreen PC Host</h1>
+<p>Host: {host_url}</p>
+<div class="code">{code if code else "-- -- -- --"}</div>
+<p>Tap below to pair with this iPad:</p>
+<a class="btn" href="{app_url}">Open ExtendScreen App</a>
+</div>
+</body>
+</html>"""
+            body = html.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         self._json(404, {"error": "not found"})
 
     def do_POST(self) -> None:
@@ -1649,6 +1695,126 @@ class ScreenRequestHandler(BaseHTTPRequestHandler):
         )
         self.wfile.write(header + frame + b"\r\n")
         self.wfile.flush()
+
+    def _raw_stream(self) -> None:
+        token = self._authorized()
+        if token is None:
+            self._json(401, {"error": "pair this iPad first"})
+            return
+        if not self.host.stream_slots.acquire(blocking=False):
+            self._json(503, {"error": "another screen is already streaming"})
+            return
+        source: Optional[FrameSource] = None
+        registered = False
+        reader_thread: Optional[threading.Thread] = None
+        stop_event = threading.Event()
+        try:
+            try:
+                self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            except OSError:
+                pass
+            fps = self.host.config.fps if self.host.config.fps >= 5 else 30
+            try:
+                self.host.begin_stream()
+                registered = True
+            except (RuntimeError, SystemExit, OSError) as error:
+                self._json(503, {"error": f"screen capture failed: {error}"})
+                return
+            assert self.host.region is not None
+            source = self.host.frame_source_factory(self.host.config, self.host.region, fps)
+            sequence, first, error = source.wait_frame(-1, 8.0)
+            if first is None:
+                self._json(503, {"error": f"screen capture failed: {error or 'no frame'}"})
+                return
+
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("X-ExtendScreen-Proto", "raw-v1")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.close_connection = True
+
+            # Binary header: [8 bytes magic 'EXTSCR01'][4 bytes width][4 bytes height]
+            magic = b"EXTSCR01"
+            header = magic + struct.pack(">II", self.host.config.width, self.host.config.height)
+            self.wfile.write(header)
+            self.wfile.flush()
+
+            acked_seq = [0]
+            sock = self.connection
+
+            def _socket_reader():
+                buf = bytearray()
+                while not stop_event.is_set():
+                    try:
+                        chunk = sock.recv(4096)
+                        if not chunk:
+                            break
+                        buf.extend(chunk)
+                        while b"\n" in buf:
+                            line, _, remainder = buf.partition(b"\n")
+                            buf = bytearray(remainder)
+                            line_str = line.decode("utf-8", "replace").strip()
+                            if not line_str:
+                                continue
+                            if line_str.startswith("ACK "):
+                                try:
+                                    s = int(line_str[4:].strip())
+                                    if s > acked_seq[0]:
+                                        acked_seq[0] = s
+                                except ValueError:
+                                    pass
+                            elif line_str.startswith("{"):
+                                try:
+                                    ev = json.loads(line_str)
+                                    if isinstance(ev, dict) and self.host.input_backend:
+                                        self.host.input_backend.apply(ev)
+                                except Exception:
+                                    pass
+                    except (OSError, socket.error):
+                        break
+                stop_event.set()
+
+            reader_thread = threading.Thread(target=_socket_reader, daemon=True, name="extendscreen-raw-reader")
+            reader_thread.start()
+
+            # First frame
+            pkt = struct.pack(">II", sequence, len(first)) + first
+            self.wfile.write(pkt)
+            self.wfile.flush()
+            last_sent_sequence = sequence
+            last_send_time = time.monotonic()
+            self.host.store.touch(token)
+
+            while self.host.running and not stop_event.is_set():
+                # ACK backpressure: wait if iPad hasn't acknowledged last sent frame yet
+                if last_sent_sequence > acked_seq[0]:
+                    time.sleep(0.002)
+                    if time.monotonic() - last_send_time < 0.5:
+                        continue
+                    # Grace timeout: if iPad took >500ms, assume dropped packet and send next frame
+
+                sequence, frame, error = source.wait_frame(last_sent_sequence, 2.0)
+                if frame is None:
+                    if error and error != "timeout":
+                        break
+                    continue
+
+                pkt = struct.pack(">II", sequence, len(frame)) + frame
+                self.wfile.write(pkt)
+                self.wfile.flush()
+                last_sent_sequence = sequence
+                last_send_time = time.monotonic()
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
+            pass
+        finally:
+            stop_event.set()
+            if source is not None:
+                source.close()
+            self.host.stream_slots.release()
+            if registered:
+                self.host.end_stream()
 
 
 # ---------------------------------------------------------------------------
