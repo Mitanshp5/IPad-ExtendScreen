@@ -6,3 +6,4 @@ cd "$DIR"
 
 echo "Starting ExtendScreen System Tray Controller..."
 exec python3 host-tools/tray-host.py "$@"
+
