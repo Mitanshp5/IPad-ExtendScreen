@@ -145,32 +145,38 @@ class LargeQRWindow(tk.Toplevel):
         self.focus_force()
 
 
-# Ensure all threads bind to the interactive 'Default' desktop
-user32 = ctypes.windll.user32
-kernel32 = ctypes.windll.kernel32
+# Ensure all threads bind to the interactive 'Default' desktop (Windows)
+if os.name == "nt":
+    user32 = ctypes.windll.user32
+    kernel32 = ctypes.windll.kernel32
 
-def ensure_default_desktop():
-    try:
-        hdesk = user32.OpenDesktopW("default", 0, False, 0x01FF)
-        if hdesk:
-            user32.SetThreadDesktop(hdesk)
-    except Exception:
-        pass
+    def ensure_default_desktop():
+        try:
+            hdesk = user32.OpenDesktopW("default", 0, False, 0x01FF)
+            if hdesk:
+                user32.SetThreadDesktop(hdesk)
+        except Exception:
+            pass
 
-ensure_default_desktop()
-_orig_bootstrap = threading.Thread._bootstrap
-def _patched_bootstrap(self):
     ensure_default_desktop()
-    return _orig_bootstrap(self)
-threading.Thread._bootstrap = _patched_bootstrap
+    _orig_bootstrap = threading.Thread._bootstrap
+    def _patched_bootstrap(self):
+        ensure_default_desktop()
+        return _orig_bootstrap(self)
+    threading.Thread._bootstrap = _patched_bootstrap
 
-# DPI Awareness
-try:
-    ctypes.windll.shcore.SetProcessDpiAwareness(2)
-except Exception:
+    # DPI Awareness
     try:
-        ctypes.windll.user32.SetProcessDPIAware()
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
     except Exception:
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            pass
+else:
+    user32 = None
+    kernel32 = None
+    def ensure_default_desktop():
         pass
 
 ROOT_DIR = pathlib.Path(__file__).resolve().parents[1]
@@ -181,20 +187,20 @@ TRAY_ON_PNG = ROOT_DIR / "host-tools" / "tray_on.png"
 LOG_FILE = ROOT_DIR / "host-tools" / "tray.log"
 
 SPI_GETWORKAREA = 0x0030
-CREATE_NO_WINDOW = 0x08000000
+CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
 
 class RECT(ctypes.Structure):
     _fields_ = [
-        ("left", wintypes.LONG),
-        ("top", wintypes.LONG),
-        ("right", wintypes.LONG),
-        ("bottom", wintypes.LONG),
+        ("left", ctypes.c_long),
+        ("top", ctypes.c_long),
+        ("right", ctypes.c_long),
+        ("bottom", ctypes.c_long),
     ]
 
 
 class POINT(ctypes.Structure):
-    _fields_ = [("x", wintypes.LONG), ("y", wintypes.LONG)]
+    _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
 
 
 # =====================================================================
@@ -311,13 +317,16 @@ def detect_lan_ip() -> str:
 
 def set_display_internal() -> bool:
     """Instantly switches Windows display configuration to single-screen (internal)."""
+    if os.name != "nt":
+        return True
     try:
-        ensure_default_desktop()
-        SDC_APPLY = 0x00000080
-        SDC_TOPOLOGY_INTERNAL = 0x00000001
-        res = user32.SetDisplayConfig(0, None, 0, None, SDC_APPLY | SDC_TOPOLOGY_INTERNAL)
-        if res == 0:
-            return True
+        if user32:
+            ensure_default_desktop()
+            SDC_APPLY = 0x00000080
+            SDC_TOPOLOGY_INTERNAL = 0x00000001
+            res = user32.SetDisplayConfig(0, None, 0, None, SDC_APPLY | SDC_TOPOLOGY_INTERNAL)
+            if res == 0:
+                return True
     except Exception:
         pass
 
@@ -333,6 +342,8 @@ def set_display_internal() -> bool:
 
 def setup_process_job():
     """Create a Windows Job Object configured to kill child processes if parent dies."""
+    if os.name != "nt" or not kernel32:
+        return None
     try:
         hJob = kernel32.CreateJobObjectW(None, None)
         class JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
@@ -382,15 +393,17 @@ def _emergency_cleanup():
 
 atexit.register(_emergency_cleanup)
 
-try:
-    PHANDLER_ROUTINE = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.DWORD)
-    def _console_ctrl_handler(dwCtrlType):
-        _emergency_cleanup()
-        return False
-    _global_ctrl_handler = PHANDLER_ROUTINE(_console_ctrl_handler)
-    kernel32.SetConsoleCtrlHandler(_global_ctrl_handler, True)
-except Exception:
-    pass
+if os.name == "nt":
+    try:
+        PHANDLER_ROUTINE = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.DWORD)
+        def _console_ctrl_handler(dwCtrlType):
+            _emergency_cleanup()
+            return False
+        _global_ctrl_handler = PHANDLER_ROUTINE(_console_ctrl_handler)
+        if kernel32:
+            kernel32.SetConsoleCtrlHandler(_global_ctrl_handler, True)
+    except Exception:
+        pass
 
 for sig in (getattr(signal, "SIGINT", None), getattr(signal, "SIGTERM", None), getattr(signal, "SIGBREAK", None)):
     if sig is not None:
@@ -581,39 +594,51 @@ class ExtendServiceManager:
         # 1. Kill tracked child process tree
         if self.proc is not None:
             try:
+                if os.name == "nt":
+                    subprocess.run(
+                        ["taskkill", "/F", "/T", "/PID", str(self.proc.pid)],
+                        capture_output=True,
+                        creationflags=CREATE_NO_WINDOW,
+                    )
+                else:
+                    self.proc.terminate()
+                    self.proc.wait(timeout=1.5)
+            except Exception:
+                try:
+                    if self.proc:
+                        self.proc.kill()
+                except Exception:
+                    pass
+            self.proc = None
+
+        # 2. Fast kill any orphaned ffmpeg / screen-host processes
+        try:
+            if os.name == "nt":
                 subprocess.run(
-                    ["taskkill", "/F", "/T", "/PID", str(self.proc.pid)],
+                    ["taskkill", "/F", "/IM", "ffmpeg.exe"],
+                    capture_output=True,
+                    creationflags=CREATE_NO_WINDOW,
+                )
+            else:
+                subprocess.run(["pkill", "-f", "screen-host.py"], capture_output=True)
+        except Exception:
+            pass
+
+        # 3. Terminate any other screen-host.py python processes (Windows)
+        if os.name == "nt":
+            try:
+                ps_cmd = (
+                    'Get-CimInstance Win32_Process | '
+                    'Where-Object { $_.CommandLine -like "*screen-host.py*" } | '
+                    'ForEach-Object { Stop-Process -Id $_.ProcessId -Force }'
+                )
+                subprocess.run(
+                    ["powershell", "-NoProfile", "-Command", ps_cmd],
                     capture_output=True,
                     creationflags=CREATE_NO_WINDOW,
                 )
             except Exception:
                 pass
-            self.proc = None
-
-        # 2. Fast kill any orphaned ffmpeg capture processes
-        try:
-            subprocess.run(
-                ["taskkill", "/F", "/IM", "ffmpeg.exe"],
-                capture_output=True,
-                creationflags=CREATE_NO_WINDOW,
-            )
-        except Exception:
-            pass
-
-        # 3. Terminate any other screen-host.py python processes
-        try:
-            ps_cmd = (
-                'Get-CimInstance Win32_Process | '
-                'Where-Object { $_.CommandLine -like "*screen-host.py*" } | '
-                'ForEach-Object { Stop-Process -Id $_.ProcessId -Force }'
-            )
-            subprocess.run(
-                ["powershell", "-NoProfile", "-Command", ps_cmd],
-                capture_output=True,
-                creationflags=CREATE_NO_WINDOW,
-            )
-        except Exception:
-            pass
 
         # 4. Revert Windows display layout to single-screen (internal)
         if reset_display:
@@ -1467,17 +1492,6 @@ class ControlWindow(tk.Toplevel):
                 self._update_pairing_display(None, None)
 
     def show_window(self):
-        pt = POINT()
-        user32.GetCursorPos(ctypes.byref(pt))
-
-        # Detect the exact monitor where the mouse/tray icon is located
-        hmon = user32.MonitorFromPoint(pt, 2)  # MONITOR_DEFAULTTONEAREST = 2
-        mi = MONITORINFO()
-        mi.cbSize = ctypes.sizeof(MONITORINFO)
-        user32.GetMonitorInfoW(hmon, ctypes.byref(mi))
-
-        work = mi.rcWork
-
         # Recalculate dimensions dynamically
         self._update_mode_tiles()
         self._update_guidance()
@@ -1485,38 +1499,58 @@ class ControlWindow(tk.Toplevel):
         self.width = max(370, self.winfo_reqwidth())
         self.height = self.winfo_reqheight()
 
-        # Horizontal positioning:
-        # If clicked in tray area (right side of monitor), center relative to click
-        if pt.x >= work.left + (work.right - work.left) // 2:
-            cand_x = pt.x - self.width // 2
-            x = max(work.left + 16, min(cand_x, work.right - self.width - 16))
+        if os.name == "nt" and user32:
+            pt = POINT()
+            user32.GetCursorPos(ctypes.byref(pt))
+
+            # Detect the exact monitor where the mouse/tray icon is located
+            hmon = user32.MonitorFromPoint(pt, 2)  # MONITOR_DEFAULTTONEAREST = 2
+            mi = MONITORINFO()
+            mi.cbSize = ctypes.sizeof(MONITORINFO)
+            user32.GetMonitorInfoW(hmon, ctypes.byref(mi))
+
+            work = mi.rcWork
+
+            # Horizontal positioning:
+            # If clicked in tray area (right side of monitor), center relative to click
+            if pt.x >= work.left + (work.right - work.left) // 2:
+                cand_x = pt.x - self.width // 2
+                x = max(work.left + 16, min(cand_x, work.right - self.width - 16))
+            else:
+                x = work.right - self.width - 16
+
+            # Vertical positioning:
+            # Hover cleanly 14px above the taskbar
+            y = work.bottom - self.height - 14
+
+            # If taskbar is at top of screen:
+            if pt.y < (work.top + work.bottom) // 2 and work.top > mi.rcMonitor.top:
+                y = work.top + 14
+
+            self.geometry(f"{self.width}x{self.height}+{x}+{y}")
         else:
-            x = work.right - self.width - 16
+            sw = self.winfo_screenwidth()
+            sh = self.winfo_screenheight()
+            x = max(20, sw - self.width - 24)
+            y = max(20, sh - self.height - 48)
+            self.geometry(f"{self.width}x{self.height}+{x}+{y}")
 
-        # Vertical positioning:
-        # Hover cleanly 14px above the taskbar
-        y = work.bottom - self.height - 14
-
-        # If taskbar is at top of screen:
-        if pt.y < (work.top + work.bottom) // 2 and work.top > mi.rcMonitor.top:
-            y = work.top + 14
-
-        self.geometry(f"{self.width}x{self.height}+{x}+{y}")
         self.update_state(self.manager.is_running())
 
         # Apply Windows 11 DWM rounded corners and dark mode
-        try:
-            hwnd = user32.GetParent(self.winfo_id()) or self.winfo_id()
-            corner = ctypes.c_int(2)  # DWMWCP_ROUND
-            ctypes.windll.dwmapi.DwmSetWindowAttribute(
-                wintypes.HWND(hwnd), 33, ctypes.byref(corner), ctypes.sizeof(corner)
-            )
-            dark = ctypes.c_int(1)
-            ctypes.windll.dwmapi.DwmSetWindowAttribute(
-                wintypes.HWND(hwnd), 20, ctypes.byref(dark), ctypes.sizeof(dark)
-            )
-        except Exception:
-            pass
+        if os.name == "nt" and user32:
+            try:
+                hwnd = user32.GetParent(self.winfo_id()) or self.winfo_id()
+                corner = ctypes.c_int(2)  # DWMWCP_ROUND
+                ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                    wintypes.HWND(hwnd), 33, ctypes.byref(corner), ctypes.sizeof(corner)
+                )
+                dark = ctypes.c_int(1)
+                ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                    wintypes.HWND(hwnd), 20, ctypes.byref(dark), ctypes.sizeof(dark)
+                )
+            except Exception:
+                pass
 
         self.deiconify()
         self.lift()
@@ -1541,21 +1575,22 @@ class ControlWindow(tk.Toplevel):
             return
 
         # 350ms grace period after opening so initial click is never misinterpreted
-        if time.monotonic() - self.opened_at > 0.35:
-            if user32.GetAsyncKeyState(0x01) & 0x8000:
-                pt = POINT()
-                user32.GetCursorPos(ctypes.byref(pt))
-                wx = self.winfo_x()
-                wy = self.winfo_y()
-                ww = max(self.width, self.winfo_width())
-                wh = max(self.height, self.winfo_height())
+        if os.name == "nt" and user32:
+            if time.monotonic() - self.opened_at > 0.35:
+                if user32.GetAsyncKeyState(0x01) & 0x8000:
+                    pt = POINT()
+                    user32.GetCursorPos(ctypes.byref(pt))
+                    wx = self.winfo_x()
+                    wy = self.winfo_y()
+                    ww = max(self.width, self.winfo_width())
+                    wh = max(self.height, self.winfo_height())
 
-                # If click occurred outside the flyout window
-                if not (wx <= pt.x <= wx + ww and wy <= pt.y <= wy + wh):
-                    self.hide()
-                    return
+                    # If click occurred outside the flyout window
+                    if not (wx <= pt.x <= wx + ww and wy <= pt.y <= wy + wh):
+                        self.hide()
+                        return
 
-        self.after(60, self._poll_click_outside)
+            self.after(60, self._poll_click_outside)
 
     def _exit_app(self):
         self.hide()

@@ -31,6 +31,7 @@ import os
 import plistlib
 import re
 import secrets
+import shutil
 import socket
 import struct
 import subprocess
@@ -211,21 +212,32 @@ def virtual_display_names() -> set[str]:
 
 def virtual_display_state() -> tuple[bool, bool]:
     """Return (connected, active) for the virtual monitor."""
-    connected = False
-    active = False
-    for adapter in _display_adapters():
-        identity = (adapter["id"] + " " + adapter["string"]).lower()
-        if "mttvdd" in identity or "virtual display driver" in identity:
-            connected = True
-            if adapter["flags"] & 1:
-                active = True
-    return connected, active
+    if os.name == "nt":
+        connected = False
+        active = False
+        for adapter in _display_adapters():
+            identity = (adapter["id"] + " " + adapter["string"]).lower()
+            if "mttvdd" in identity or "virtual display driver" in identity:
+                connected = True
+                if adapter["flags"] & 1:
+                    active = True
+        return connected, active
+    monitors = enumerate_monitors()
+    virtual_mons = [m for m in monitors if "virtual" in m.name.lower() or "dummy" in m.name.lower()]
+    if virtual_mons:
+        return True, True
+    secondaries = [m for m in monitors if not m.primary]
+    if secondaries:
+        return True, True
+    return False, False
 
 
 def other_active_secondaries() -> list[MonitorInfo]:
-    virtual_names = virtual_display_names()
-    return [monitor for monitor in enumerate_monitors()
-            if not monitor.primary and monitor.name not in virtual_names]
+    if os.name == "nt":
+        virtual_names = virtual_display_names()
+        return [monitor for monitor in enumerate_monitors()
+                if not monitor.primary and monitor.name not in virtual_names]
+    return [monitor for monitor in enumerate_monitors() if not monitor.primary]
 
 
 class DisplayTopology:
@@ -255,17 +267,18 @@ class DisplayTopology:
             except Exception:
                 pass
 
-        executable = os.path.join(os.environ.get("WINDIR", r"C:\Windows"),
-                                  "System32", "DisplaySwitch.exe")
-        try:
-            subprocess.run([executable, option], check=False, timeout=12,
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                           creationflags=(0x08000000 if os.name == "nt" else 0))
-            return True
-        except (OSError, subprocess.SubprocessError) as error:
-            print(f"Display: could not change the Windows display layout ({error}).",
-                  file=sys.stderr)
-            return False
+            executable = os.path.join(os.environ.get("WINDIR", r"C:\Windows"),
+                                      "System32", "DisplaySwitch.exe")
+            try:
+                subprocess.run([executable, option], check=False, timeout=12,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                               creationflags=(0x08000000 if os.name == "nt" else 0))
+                return True
+            except (OSError, subprocess.SubprocessError) as error:
+                print(f"Display: could not change the Windows display layout ({error}).",
+                      file=sys.stderr)
+                return False
+        return True
 
     def _wait_for(self, active: bool, timeout: float) -> bool:
         deadline = time.monotonic() + timeout
@@ -313,9 +326,101 @@ class DisplayTopology:
         return True
 
 
+def _enumerate_monitors_linux() -> list[MonitorInfo]:
+    found: list[MonitorInfo] = []
+
+    # 1. Try XRandR extension via libXrandr + libX11
+    try:
+        class XRRMonitorInfo(ctypes.Structure):
+            _fields_ = [
+                ("name", ctypes.c_ulong),
+                ("primary", ctypes.c_int),
+                ("automatic", ctypes.c_int),
+                ("noutput", ctypes.c_int),
+                ("x", ctypes.c_int),
+                ("y", ctypes.c_int),
+                ("width", ctypes.c_int),
+                ("height", ctypes.c_int),
+                ("mwidth", ctypes.c_int),
+                ("mheight", ctypes.c_int),
+                ("outputs", ctypes.c_void_p),
+            ]
+
+        x11 = ctypes.cdll.LoadLibrary("libX11.so.6")
+        xr = ctypes.cdll.LoadLibrary("libXrandr.so.2")
+        x11.XOpenDisplay.restype = ctypes.c_void_p
+        x11.XOpenDisplay.argtypes = [ctypes.c_char_p]
+        d = x11.XOpenDisplay(None)
+        if d:
+            root = x11.XDefaultRootWindow(d)
+            nmon = ctypes.c_int(0)
+            xr.XRRGetMonitors.restype = ctypes.POINTER(XRRMonitorInfo)
+            xr.XRRGetMonitors.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int, ctypes.POINTER(ctypes.c_int)]
+            x11.XGetAtomName.restype = ctypes.c_char_p
+            x11.XGetAtomName.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+            mon_ptr = xr.XRRGetMonitors(d, root, 1, ctypes.byref(nmon))
+            if mon_ptr and nmon.value > 0:
+                for i in range(nmon.value):
+                    m = mon_ptr[i]
+                    name_raw = x11.XGetAtomName(d, m.name) if m.name else None
+                    name = name_raw.decode("utf-8", "replace") if name_raw else f"Monitor-{i+1}"
+                    found.append(MonitorInfo(
+                        index=0,
+                        region=Region(m.x, m.y, m.width, m.height),
+                        primary=bool(m.primary),
+                        name=name,
+                    ))
+                xr.XRRFreeMonitors(mon_ptr)
+            x11.XCloseDisplay(d)
+    except Exception:
+        pass
+
+    # 2. Fallback to parsing `xrandr --current` CLI output
+    if not found:
+        try:
+            res = subprocess.run(["xrandr", "--current"], capture_output=True, text=True, timeout=3)
+            if res.returncode == 0:
+                pattern = re.compile(r"^(\S+)\s+connected\s+(primary\s+)?(\d+)x(\d+)\+(\d+)\+(\d+)", re.MULTILINE)
+                for match in pattern.finditer(res.stdout):
+                    m_name = match.group(1)
+                    m_prim = bool(match.group(2))
+                    w, h, x, y = int(match.group(3)), int(match.group(4)), int(match.group(5)), int(match.group(6))
+                    found.append(MonitorInfo(
+                        index=0,
+                        region=Region(x, y, w, h),
+                        primary=m_prim,
+                        name=m_name,
+                    ))
+        except Exception:
+            pass
+
+    # 3. Fallback to single primary screen from libX11
+    if not found:
+        try:
+            x11 = ctypes.cdll.LoadLibrary("libX11.so.6")
+            x11.XOpenDisplay.restype = ctypes.c_void_p
+            d = x11.XOpenDisplay(None)
+            if d:
+                w = x11.XDisplayWidth(d, 0)
+                h = x11.XDisplayHeight(d, 0)
+                x11.XCloseDisplay(d)
+                if w > 0 and h > 0:
+                    found.append(MonitorInfo(index=0, region=Region(0, 0, w, h), primary=True, name="Default"))
+        except Exception:
+            pass
+
+    # 4. Ultimate fallback
+    if not found:
+        found.append(MonitorInfo(index=0, region=Region(0, 0, 1920, 1080), primary=True, name="Screen"))
+
+    found.sort(key=lambda item: (item.region.x, item.region.y))
+    return [MonitorInfo(index=i + 1, region=m.region, primary=m.primary, name=m.name)
+            for i, m in enumerate(found)]
+
+
 def enumerate_monitors() -> list[MonitorInfo]:
     if os.name != "nt":
-        return []
+        return _enumerate_monitors_linux()
     user32 = ctypes.windll.user32
     found: list[MonitorInfo] = []
 
@@ -350,6 +455,19 @@ def virtual_desktop_region() -> Region:
         height = user32.GetSystemMetrics(79)  # SM_CYVIRTUALSCREEN
         if width > 0 and height > 0:
             return Region(x, y, width, height)
+    else:
+        try:
+            x11 = ctypes.cdll.LoadLibrary("libX11.so.6")
+            x11.XOpenDisplay.restype = ctypes.c_void_p
+            d = x11.XOpenDisplay(None)
+            if d:
+                w = x11.XDisplayWidth(d, 0)
+                h = x11.XDisplayHeight(d, 0)
+                x11.XCloseDisplay(d)
+                if w > 0 and h > 0:
+                    return Region(0, 0, w, h)
+        except Exception:
+            pass
     return Region(0, 0, 1024, 768)
 
 
@@ -631,6 +749,25 @@ class FFmpegFrameSource(FrameSource):
                 f"hwdownload,format=bgra,{filters}"
             )
             return [*common, "-filter_complex", graph, *output]
+        if self.capture == "x11grab" or (self.capture == "auto" and os.name != "nt"):
+            display = os.environ.get("DISPLAY", ":0.0")
+            if not display.startswith(":"):
+                display = f":{display}"
+            input_spec = f"{display}+{region.x},{region.y}"
+            return [
+                *common,
+                "-f", "x11grab", "-framerate", str(self.fps), "-draw_mouse", "1",
+                "-video_size", f"{region.width}x{region.height}", "-i", input_spec,
+                "-vf", filters, *output,
+            ]
+        if self.capture == "kmsgrab":
+            return [
+                *common,
+                "-device", "/dev/dri/card0",
+                "-f", "kmsgrab", "-framerate", str(self.fps), "-i", "-",
+                "-vf", f"hwdownload,format=bgr0,{filters}",
+                *output,
+            ]
         return [
             *common,
             "-f", "gdigrab", "-framerate", str(self.fps), "-draw_mouse", "1",
@@ -748,7 +885,12 @@ class FallbackFrameSource(FrameSource):
 
 
 def make_ffmpeg_source(config: Config, region: Region, fps: int) -> FrameSource:
-    if config.test_pattern or config.capture == "gdigrab":
+    if config.test_pattern:
+        return FFmpegFrameSource(config, region, fps, capture="gdigrab")
+    if os.name != "nt":
+        capture = config.capture if config.capture != "auto" else "x11grab"
+        return FFmpegFrameSource(config, region, fps, capture=capture)
+    if config.capture == "gdigrab":
         return FFmpegFrameSource(config, region, fps, capture="gdigrab")
     return FallbackFrameSource(config, region, fps)
 
@@ -954,13 +1096,194 @@ if os.name == "nt":
             return False
 
 else:
-    class WindowsInput(NullInput):  # type: ignore[no-redef]
+    class LinuxInput:
+        available = True
+
+        VK = {
+            "enter": "Return", "return": "Return", "tab": "Tab", "esc": "Escape", "escape": "Escape",
+            "backspace": "BackSpace", "delete": "Delete", "space": "space",
+            "left": "Left", "up": "Up", "right": "Right", "down": "Down",
+            "home": "Home", "end": "End", "pageup": "Page_Up", "pagedown": "Page_Down",
+            "insert": "Insert", "f1": "F1", "f2": "F2", "f3": "F3", "f4": "F4",
+            "f5": "F5", "f6": "F6", "f7": "F7", "f8": "F8",
+            "f9": "F9", "f10": "F10", "f11": "F11", "f12": "F12",
+        }
+        MODS = {
+            "shift": "Shift_L", "ctrl": "Control_L", "alt": "Alt_L", "meta": "Super_L", "win": "Super_L", "cmd": "Super_L",
+        }
+
         def __init__(self, region: Region, output_width: int, output_height: int) -> None:
-            self.available = False
+            self.region = region
+            self.output_width = output_width
+            self.output_height = output_height
+            scale = min(output_width / region.width, output_height / region.height)
+            self.draw_width = max(1, int(round(region.width * scale)))
+            self.draw_height = max(1, int(round(region.height * scale)))
+            self.pad_x = (output_width - self.draw_width) // 2
+            self.pad_y = (output_height - self.draw_height) // 2
+            self.scale = scale
+            self._left_down = False
+
+            self.display = None
+            self.x11 = None
+            self.xtst = None
+            self.has_xdotool = bool(shutil.which("xdotool"))
+            self._init_x11()
+
+        def _init_x11(self) -> None:
+            try:
+                self.x11 = ctypes.cdll.LoadLibrary("libX11.so.6")
+                self.xtst = ctypes.cdll.LoadLibrary("libXtst.so.6")
+                self.x11.XOpenDisplay.restype = ctypes.c_void_p
+                self.x11.XOpenDisplay.argtypes = [ctypes.c_char_p]
+                self.display = self.x11.XOpenDisplay(None)
+                if self.display:
+                    self.xtst.XTestFakeMotionEvent.argtypes = [
+                        ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_ulong
+                    ]
+                    self.xtst.XTestFakeMotionEvent.restype = ctypes.c_int
+                    self.xtst.XTestFakeButtonEvent.argtypes = [
+                        ctypes.c_void_p, ctypes.c_uint, ctypes.c_int, ctypes.c_ulong
+                    ]
+                    self.xtst.XTestFakeButtonEvent.restype = ctypes.c_int
+                    self.xtst.XTestFakeKeyEvent.argtypes = [
+                        ctypes.c_void_p, ctypes.c_uint, ctypes.c_int, ctypes.c_ulong
+                    ]
+                    self.xtst.XTestFakeKeyEvent.restype = ctypes.c_int
+                    self.x11.XFlush.argtypes = [ctypes.c_void_p]
+                    self.x11.XStringToKeysym.argtypes = [ctypes.c_char_p]
+                    self.x11.XStringToKeysym.restype = ctypes.c_ulong
+                    self.x11.XKeysymToKeycode.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+                    self.x11.XKeysymToKeycode.restype = ctypes.c_uint8
+            except Exception:
+                self.display = None
+
+        def _screen_point(self, event: dict) -> Optional[tuple[int, int]]:
+            x = event.get("x")
+            y = event.get("y")
+            if not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
+                return None
+            if not math.isfinite(x) or not math.isfinite(y) or not (0 <= x <= 1) or not (0 <= y <= 1):
+                return None
+            draw_x = clamp(int(round(x * self.output_width)) - self.pad_x, 0, self.draw_width - 1)
+            draw_y = clamp(int(round(y * self.output_height)) - self.pad_y, 0, self.draw_height - 1)
+            return (self.region.x + int(draw_x / self.scale),
+                    self.region.y + int(draw_y / self.scale))
+
+        def _mouse_move(self, point: tuple[int, int]) -> None:
+            if self.display:
+                self.xtst.XTestFakeMotionEvent(self.display, -1, point[0], point[1], 0)
+                self.x11.XFlush(self.display)
+            elif self.has_xdotool:
+                subprocess.run(["xdotool", "mousemove", str(point[0]), str(point[1])],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        def _mouse_button(self, button: int, down: bool, point: Optional[tuple[int, int]] = None) -> None:
+            if point is not None:
+                self._mouse_move(point)
+            if self.display:
+                self.xtst.XTestFakeButtonEvent(self.display, button, 1 if down else 0, 0)
+                self.x11.XFlush(self.display)
+            elif self.has_xdotool:
+                action = "mousedown" if down else "mouseup"
+                subprocess.run(["xdotool", action, str(button)],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        def _click(self, point: tuple[int, int], button: int = 1) -> None:
+            self._mouse_button(button, True, point)
+            time.sleep(0.018)
+            self._mouse_button(button, False, point)
+
+        def _send_key_str(self, key_name: str, up: bool = False) -> bool:
+            if self.display:
+                keysym = self.x11.XStringToKeysym(key_name.encode("ascii"))
+                if keysym:
+                    keycode = self.x11.XKeysymToKeycode(self.display, keysym)
+                    if keycode:
+                        self.xtst.XTestFakeKeyEvent(self.display, keycode, 0 if up else 1, 0)
+                        self.x11.XFlush(self.display)
+                        return True
+            elif self.has_xdotool:
+                action = "keyup" if up else "keydown"
+                subprocess.run(["xdotool", action, key_name],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                return True
+            return False
+
+        def apply(self, event: dict) -> bool:
+            if not isinstance(event, dict):
+                return False
+            kind = event.get("type")
+            if kind in {"tap", "rclick", "down", "move", "up"}:
+                point = self._screen_point(event)
+                if point is None:
+                    return False
+                if kind == "tap":
+                    self._click(point, button=1)
+                elif kind == "rclick":
+                    self._click(point, button=3)
+                elif kind == "down":
+                    self._mouse_button(1, True, point)
+                    self._left_down = True
+                elif kind == "move":
+                    self._mouse_move(point)
+                elif kind == "up":
+                    self._mouse_button(1, False, point)
+                    self._left_down = False
+                return True
+            if kind == "scroll":
+                dy = event.get("dy")
+                if not isinstance(dy, int) or abs(dy) > 2400:
+                    return False
+                button = 4 if dy > 0 else 5
+                clicks = max(1, min(6, abs(dy) // 100))
+                for _ in range(clicks):
+                    self._mouse_button(button, True)
+                    self._mouse_button(button, False)
+                return True
+            if kind == "text":
+                text = event.get("text")
+                if not isinstance(text, str) or not text or len(text) > 512 or "\x00" in text:
+                    return False
+                if self.has_xdotool:
+                    subprocess.run(["xdotool", "type", "--", text],
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    return True
+                for char in text:
+                    if char == "\n":
+                        self._send_key_str("Return")
+                        self._send_key_str("Return", up=True)
+                    elif char == "\t":
+                        self._send_key_str("Tab")
+                        self._send_key_str("Tab", up=True)
+                    else:
+                        self._send_key_str(char)
+                        self._send_key_str(char, up=True)
+                return True
+            if kind == "key":
+                name = event.get("name")
+                mods = event.get("mods", [])
+                if not isinstance(name, str) or not isinstance(mods, list):
+                    return False
+                key_name = self.VK.get(name.lower(), name)
+                mod_names = [self.MODS.get(m.lower()) for m in mods if self.MODS.get(m.lower())]
+                for mod in mod_names:
+                    self._send_key_str(mod)
+                self._send_key_str(key_name)
+                time.sleep(0.01)
+                self._send_key_str(key_name, up=True)
+                for mod in reversed(mod_names):
+                    self._send_key_str(mod, up=True)
+                return True
+            return False
 
 
 def make_input_backend(config: Config, region: Region) -> object:
-    return WindowsInput(region, config.width, config.height)
+    if config.no_input:
+        return NullInput()
+    if os.name == "nt":
+        return WindowsInput(region, config.width, config.height)
+    return LinuxInput(region, config.width, config.height)
 
 
 # ---------------------------------------------------------------------------
@@ -1368,11 +1691,18 @@ def resolve_region(config: Config) -> Region:
         for monitor in monitors:
             if not monitor.primary:
                 return monitor.region
-        raise SystemExit(
-            "extend mode needs a second display, but only the primary monitor is active.\n"
-            "Install a virtual display driver (for example VirtualDrivers.Virtual-Display-Driver), "
-            "then switch Windows to Extend (Win+P) and run --list-monitors again."
-        )
+        if os.name == "nt":
+            raise SystemExit(
+                "extend mode needs a second display, but only the primary monitor is active.\n"
+                "Install a virtual display driver (for example VirtualDrivers.Virtual-Display-Driver), "
+                "then switch Windows to Extend (Win+P) and run --list-monitors again."
+            )
+        else:
+            raise SystemExit(
+                "extend mode needs a second display, but only the primary monitor is active.\n"
+                "On Linux, configure a virtual display output with xrandr or dummy display driver,\n"
+                "or capture an explicit region using --region x,y,width,height or use --monitor primary."
+            )
     try:
         index = int(config.monitor)
     except ValueError as error:
@@ -1844,8 +2174,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="private paired-device state directory")
     parser.add_argument("--test-pattern", action="store_true",
                         help="stream a synthetic test pattern instead of the desktop")
-    parser.add_argument("--capture", choices=("auto", "gdigrab", "ddagrab"), default="auto",
-                        help="desktop capture backend (default: auto, ddagrab with gdigrab fallback)")
+    parser.add_argument("--capture", choices=("auto", "gdigrab", "ddagrab", "x11grab", "kmsgrab"), default="auto",
+                        help="desktop capture backend (default: auto; ddagrab/gdigrab on Windows, x11grab on Linux)")
     parser.add_argument("--ddagrab-output", type=int, default=None, metavar="N",
                         help="Desktop Duplication output index (default: match the capture monitor)")
     parser.add_argument("--no-manage-display", action="store_true",
@@ -1868,7 +2198,7 @@ def build_parser() -> argparse.ArgumentParser:
 def print_monitors() -> None:
     monitors = enumerate_monitors()
     if not monitors:
-        print("No Windows monitors were found.")
+        print("No monitors were found.")
         return
     for monitor in monitors:
         region = monitor.region
@@ -1925,8 +2255,6 @@ def main(argv: Optional[list[str]] = None) -> int:
         args.monitor = "extend"
     if args.cable:
         args.usbmux = args.usbmux or default_usbmux_address()
-    if not args.test_pattern and os.name != "nt":
-        parser.error("desktop capture and input forwarding require Windows; use --test-pattern for a stream test")
     if not args.test_pattern:
         try:
             subprocess.run(["ffmpeg", "-version"], check=True,

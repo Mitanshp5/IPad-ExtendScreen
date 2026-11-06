@@ -86,42 +86,67 @@ curl.exe -s -m 120 -F "file=@C:\Code\ExtendScreen\ExtendScreen-1.0.9.deb" http:/
 
 ### System Tray Controller (Recommended)
 
+**Windows**:
 Double-click `start-tray.cmd` to start ExtendScreen in your Windows system tray.
+
+**Linux**:
+Run `./start-tray.sh` (requires `python3`, `python3-tk`, `python3-pil`, `pystray`, `ffmpeg`).
+
 - **Click the tray icon**: Opens a floating control card directly above the system tray.
 - **ON / OFF Toggle**:
   - **ON**: Starts screen streaming services (USB Cable mode or Wi-Fi mode).
-  - **OFF**: Immediately kills all host processes (`screen-host.py`, `ffmpeg.exe`) and restores Windows display to single-screen.
-- **Start with Windows**: Toggle the checkbox in the flyout card to launch on boot automatically.
+  - **OFF**: Immediately kills all host processes (`screen-host.py`, `ffmpeg`) and restores display settings.
+- **QR Code Pairing**: Displays an embedded 260px QR code and click-to-enlarge 350px dialog for instant iPad camera pairing.
 - **Right-Click**: Quick context menu to toggle ON/OFF, open controls, or exit.
 
 ---
 
-### Command-Line / Batch Scripts
+### Command-Line / Terminal Scripts
 
-### USB Cable Mode (Recommended)
+#### Linux Prerequisites
+Install the required tools for screen capture, input injection, and USB multiplexing:
+```bash
+sudo apt update
+sudo apt install python3 python3-pil ffmpeg libxtst6 libx11-6 usbmuxd libimobiledevice-utils
+```
+
+#### USB Cable Mode (Recommended)
 
 1. Open **Extend Screen** on the iPad.
 2. Tap **Settings**, select **Connection mode: USB cable**, and tap **Save**.
-3. Plug the iPad into your PC with a USB cable (unlock the iPad and tap **Trust** if prompted).
+3. Plug the iPad into your computer with a USB cable (unlock the iPad and tap **Trust** if prompted).
 4. Run:
-   ```cmd
-   start-cable-host.cmd
-   ```
+   - **Windows**:
+     ```cmd
+     start-cable-host.cmd
+     ```
+   - **Linux**:
+     ```bash
+     ./start-cable-host.sh
+     ```
    Or directly with Python:
-   ```cmd
-   python host-tools\screen-host.py --cable --extend --fps 60
+   ```bash
+   python host-tools/screen-host.py --cable --fps 45
    ```
-5. Windows automatically switches to extended desktop mode and streams to the iPad. Press `Ctrl+C` to stop (Windows automatically reverts to single-screen mode).
+5. The host connects through `usbmuxd` and streams smoothly to the iPad. Press `Ctrl+C` to stop.
 
-### Wi-Fi Mode
+#### Wi-Fi Mode
 
 1. Open **Extend Screen** on the iPad.
-2. In **Settings**, select **Connection mode: Wi-Fi**, and set Server URL to `http://<PC-IP>:8644`.
-3. On the PC, run:
-   ```cmd
-   start-extend-host.cmd
+2. Run on your computer:
+   - **Windows**:
+     ```cmd
+     start-extend-host.cmd
+     ```
+   - **Linux**:
+     ```bash
+     ./start-extend-host.sh
+     ```
+   Or directly with Python:
+   ```bash
+   python host-tools/screen-host.py --fps 30
    ```
-4. Enter the pair code shown on the PC host into the iPad Settings, tap **Pair with host**, then tap **Save**.
+3. Tap the **📷** camera icon on the iPad to scan the QR code displayed in the host window, or enter the 8-digit pairing code manually in **Settings**.
 
 ---
 
