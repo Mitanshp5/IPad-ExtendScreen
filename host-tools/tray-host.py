@@ -24,6 +24,13 @@ import time
 import tkinter as tk
 from typing import Optional
 
+if os.name == "nt":
+    try:
+        import ctypes
+        ctypes.windll.winmm.timeBeginPeriod(1)
+    except Exception:
+        pass
+
 from PIL import Image, ImageTk, ImageDraw, ImageFilter
 import pystray
 

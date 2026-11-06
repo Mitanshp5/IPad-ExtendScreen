@@ -45,6 +45,12 @@ from pathlib import Path
 from typing import Callable, Optional
 from urllib.parse import parse_qs, urlsplit
 
+if os.name == "nt":
+    try:
+        ctypes.windll.winmm.timeBeginPeriod(1)
+    except Exception:
+        pass
+
 APP_NAME = "extendscreen"
 APP_VERSION = "1.0.0"
 BOUNDARY = b"HPScreenFrame"
@@ -728,8 +734,10 @@ class FFmpegFrameSource(FrameSource):
             f"force_original_aspect_ratio=decrease:flags=fast_bilinear,"
             f"pad={config.width}:{config.height}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1"
         )
+        threads_arg = ["-threads", str(min(4, os.cpu_count() or 2))]
         common = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin"]
-        output = ["-an", "-c:v", "mjpeg", "-q:v", str(config.quality), "-pix_fmt", "yuvj420p",
+        output = ["-an", "-c:v", "mjpeg", "-q:v", str(config.quality),
+                  *threads_arg, "-huffman", "0", "-pix_fmt", "yuvj420p",
                   "-f", "image2pipe", "-"]
         if config.test_pattern:
             return [
@@ -770,6 +778,7 @@ class FFmpegFrameSource(FrameSource):
             ]
         return [
             *common,
+            "-probesize", "32", "-analyzeduration", "0",
             "-f", "gdigrab", "-framerate", str(self.fps), "-draw_mouse", "1",
             "-offset_x", str(region.x), "-offset_y", str(region.y),
             "-video_size", f"{region.width}x{region.height}", "-i", "desktop",

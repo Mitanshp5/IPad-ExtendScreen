@@ -454,26 +454,38 @@ static const CGFloat PSChromeHotZoneHeight = 140.0;
     dispatch_async(self.decodeQueue, ^{
         @autoreleasepool {
             CGImageRef cgImage = [weakSelf decodeJPEG:frameToDecode];
-            dispatch_async(dispatch_get_main_queue(), ^{
-                PSScreenViewController *controller = weakSelf;
-                if (!controller) {
-                    if (cgImage) CGImageRelease(cgImage);
-                    return;
-                }
-                if (controller.acceptFrames && cgImage) {
-                    controller.lastFrameSize = CGSizeMake((CGFloat)CGImageGetWidth(cgImage), (CGFloat)CGImageGetHeight(cgImage));
-                    [CATransaction begin];
-                    [CATransaction setDisableActions:YES];
-                    controller.imageView.layer.contents = (__bridge id)cgImage;
-                    [CATransaction commit];
-                    controller.framesThisSecond++;
-                    if (seqToDecode > 0) {
-                        [controller.stream sendACK:seqToDecode];
+            if (cgImage) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    PSScreenViewController *controller = weakSelf;
+                    if (!controller) {
+                        CGImageRelease(cgImage);
+                        return;
                     }
-                }
-                if (cgImage) CGImageRelease(cgImage);
+                    if (controller.acceptFrames) {
+                        controller.lastFrameSize = CGSizeMake((CGFloat)CGImageGetWidth(cgImage), (CGFloat)CGImageGetHeight(cgImage));
+                        [CATransaction begin];
+                        [CATransaction setDisableActions:YES];
+                        controller.imageView.layer.contents = (__bridge id)cgImage;
+                        [CATransaction commit];
+                        controller.framesThisSecond++;
+                        if (seqToDecode > 0) {
+                            [controller.stream sendACK:seqToDecode];
+                        }
+                    }
+                    CGImageRelease(cgImage);
+                });
+            }
+
+            // Concurrent pipeline: immediately start decoding the next frame on decodeQueue
+            // in parallel with UI rendering on the main thread!
+            PSScreenViewController *controller = weakSelf;
+            if (controller && controller.acceptFrames) {
                 [controller dispatchNextDecode];
-            });
+            } else {
+                @synchronized (weakSelf) {
+                    weakSelf.decoding = NO;
+                }
+            }
         }
     });
 }
