@@ -86,7 +86,7 @@ static const CGFloat PSChromeHotZoneHeight = 140.0;
 
 - (void)viewDidLoad {
     [super viewDidLoad];
-    self.turboDecoder = [[PSTurboDecoder alloc] initWithPoolSize:4];
+    self.turboDecoder = [[PSTurboDecoder alloc] initWithPoolSize:10];
     self.view.backgroundColor = [UIColor blackColor];
     self.view.multipleTouchEnabled = YES;
     self.imageView = [[UIImageView alloc] initWithFrame:self.view.bounds];
@@ -405,18 +405,55 @@ static const CGFloat PSChromeHotZoneHeight = 140.0;
     [UIApplication sharedApplication].idleTimerDisabled = NO;
 }
 
+- (CGImageRef)decodeJPEG:(NSData *)jpeg {
+    if (!jpeg.length) return NULL;
+
+    // 1. Fast Apple ImageIO hardware decoder
+    CGImageSourceRef source = CGImageSourceCreateWithData((__bridge CFDataRef)jpeg,
+        (__bridge CFDictionaryRef)@{(__bridge id)kCGImageSourceShouldCache: @NO});
+    if (source) {
+        CGImageRef image = CGImageSourceCreateImageAtIndex(source, 0, NULL);
+        CFRelease(source);
+        if (image) return image;
+    }
+
+    // 2. High-performance NEON SIMD libjpeg-turbo fallback
+    if (self.turboDecoder) {
+        return [self.turboDecoder decode:jpeg];
+    }
+
+    return NULL;
+}
+
 - (void)receiveFrame:(NSData *)jpeg sequence:(NSUInteger)sequence {
     if (!self.acceptFrames || !jpeg.length) return;
-    if (self.decoding) {
+    @synchronized (self) {
         self.pendingFrame = jpeg;
         self.pendingSequence = sequence;
-        return;
+        if (self.decoding) return;
+        self.decoding = YES;
     }
-    self.decoding = YES;
+    [self dispatchNextDecode];
+}
+
+- (void)dispatchNextDecode {
+    NSData *frameToDecode = nil;
+    NSUInteger seqToDecode = 0;
+    @synchronized (self) {
+        if (!self.acceptFrames || !self.pendingFrame) {
+            self.decoding = NO;
+            return;
+        }
+        frameToDecode = self.pendingFrame;
+        seqToDecode = self.pendingSequence;
+        self.pendingFrame = nil;
+        self.pendingSequence = 0;
+    }
+
     __weak PSScreenViewController *weakSelf = self;
     dispatch_async(self.decodeQueue, ^{
         @autoreleasepool {
-            CGImageRef cgImage = [weakSelf.turboDecoder decode:jpeg];
+            CGImageRef cgImage = [weakSelf decodeJPEG:frameToDecode];
             dispatch_async(dispatch_get_main_queue(), ^{
                 PSScreenViewController *controller = weakSelf;
                 if (!controller) {
@@ -430,17 +467,12 @@ static const CGFloat PSChromeHotZoneHeight = 140.0;
                     controller.imageView.layer.contents = (__bridge id)cgImage;
                     [CATransaction commit];
                     controller.framesThisSecond++;
-                    if (sequence > 0) {
-                        [controller.stream sendACK:sequence];
+                    if (seqToDecode > 0) {
+                        [controller.stream sendACK:seqToDecode];
                     }
                 }
                 if (cgImage) CGImageRelease(cgImage);
-                controller.decoding = NO;
-                NSData *pending = controller.pendingFrame;
-                NSUInteger pendingSeq = controller.pendingSequence;
-                controller.pendingFrame = nil;
-                controller.pendingSequence = 0;
-                if (pending) [controller receiveFrame:pending sequence:pendingSeq];
+                [controller dispatchNextDecode];
             });
         }
     });

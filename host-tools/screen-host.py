@@ -1396,6 +1396,10 @@ def usbmux_connect(address: str, device_port: int, udid: Optional[str] = None) -
         if reply.get("MessageType") != "Result" or int(reply.get("Number", -1)) != 0:
             raise RuntimeError(f"the iPad refused the cable port (usbmuxd result {reply.get('Number')!r})")
         sock.settimeout(5)
+        try:
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        except OSError:
+            pass
         return sock
     except Exception:
         try:
@@ -1481,6 +1485,10 @@ def run_cable(config: Config, args: argparse.Namespace,
                 host, port = args.cable_connect, "8765"
             print(f"Connecting to {host}:{port} ...")
             sock = socket.create_connection((host, int(port)), timeout=10)
+            try:
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            except OSError:
+                pass
         else:
             print(f"Connecting through usbmuxd at {args.usbmux} ...")
             deadline = time.monotonic() + 30.0

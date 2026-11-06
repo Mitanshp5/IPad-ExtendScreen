@@ -8,6 +8,7 @@ typedef struct {
     void *data;
     size_t capacity;
     volatile int32_t inUse;
+    int isDynamic;
 } PSBuffer;
 
 typedef struct {
@@ -29,7 +30,12 @@ static void PSReleaseBuffer(void *info, const void *data, size_t size) {
     (void)data;
     (void)size;
     PSBuffer *buf = (PSBuffer *)info;
-    buf->inUse = 0;
+    if (buf->isDynamic) {
+        if (buf->data) free(buf->data);
+        free(buf);
+    } else {
+        buf->inUse = 0;
+    }
 }
 
 @implementation PSTurboDecoder {
@@ -42,7 +48,7 @@ static void PSReleaseBuffer(void *info, const void *data, size_t size) {
 - (instancetype)initWithPoolSize:(NSUInteger)count {
     self = [super init];
     if (self) {
-        _poolCount = MAX(count, (NSUInteger)3);
+        _poolCount = MAX(count, (NSUInteger)8);
         _pool = (PSBuffer *)calloc(_poolCount, sizeof(PSBuffer));
         _poolLock = [[NSLock alloc] init];
         _colorSpace = CGColorSpaceCreateDeviceRGB();
@@ -76,11 +82,26 @@ static void PSReleaseBuffer(void *info, const void *data, size_t size) {
     }
     [_poolLock unlock];
 
-    if (chosen && !chosen->data) {
-        chosen->inUse = 0;
+    if (chosen) {
+        if (!chosen->data) {
+            chosen->inUse = 0;
+            return NULL;
+        }
+        return chosen;
+    }
+
+    // Dynamic buffer fallback if pool is fully saturated to guarantee zero dropped frames
+    PSBuffer *dynamicBuf = (PSBuffer *)calloc(1, sizeof(PSBuffer));
+    if (!dynamicBuf) return NULL;
+    dynamicBuf->data = valloc(needed);
+    if (!dynamicBuf->data) {
+        free(dynamicBuf);
         return NULL;
     }
-    return chosen;
+    dynamicBuf->capacity = needed;
+    dynamicBuf->inUse = 1;
+    dynamicBuf->isDynamic = 1;
+    return dynamicBuf;
 }
 
 - (CGImageRef)decode:(NSData *)jpeg {
@@ -126,9 +147,13 @@ static void PSReleaseBuffer(void *info, const void *data, size_t size) {
     }
 
     uint8_t *base = (uint8_t *)buf->data;
+    JSAMPROW rows[16];
     while (cinfo.output_scanline < cinfo.output_height) {
-        JSAMPROW row = base + cinfo.output_scanline * stride;
-        jpeg_read_scanlines(&cinfo, &row, 1);
+        JDIMENSION linesToRead = MIN((JDIMENSION)16, cinfo.output_height - cinfo.output_scanline);
+        for (JDIMENSION i = 0; i < linesToRead; i++) {
+            rows[i] = base + (cinfo.output_scanline + i) * stride;
+        }
+        jpeg_read_scanlines(&cinfo, rows, linesToRead);
     }
 
     jpeg_finish_decompress(&cinfo);

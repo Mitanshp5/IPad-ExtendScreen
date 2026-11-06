@@ -467,7 +467,8 @@ class ExtendServiceManager:
 
         cmd = [sys.executable, "-u", str(HOST_SCRIPT), "--parent-pid", str(os.getpid())]
         if mode == "cable":
-            cmd.extend(["--cable", "--extend", "--fps", str(fps), "--quality", "5"])
+            q = "6" if fps >= 60 else "5"
+            cmd.extend(["--cable", "--extend", "--fps", str(fps), "--quality", q])
         else:
             cmd.extend(["--extend", "--fps", str(fps), "--quality", "7"])
 

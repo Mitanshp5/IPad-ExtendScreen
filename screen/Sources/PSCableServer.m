@@ -3,6 +3,7 @@
 #import <arpa/inet.h>
 #import <errno.h>
 #import <netinet/in.h>
+#import <netinet/tcp.h>
 #import <sys/socket.h>
 #import <sys/time.h>
 #import <unistd.h>
@@ -114,6 +115,7 @@ static const NSUInteger PSCableMaximumFrame = 4 * 1024 * 1024;
             }
             int one = 1;
             setsockopt(client, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(one));
+            setsockopt(client, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
             @synchronized (self) {
                 if (!_running) {
                     close(client);
@@ -269,10 +271,8 @@ static const NSUInteger PSCableMaximumFrame = 4 * 1024 * 1024;
 }
 
 - (void)reportFrame:(NSData *)frame {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        id<PSCableServerDelegate> delegate = self.delegate;
-        if (delegate) [delegate cableServer:self frame:frame];
-    });
+    id<PSCableServerDelegate> delegate = self.delegate;
+    if (delegate) [delegate cableServer:self frame:frame];
 }
 
 - (void)dealloc {
