@@ -179,6 +179,42 @@ if os.name == "nt":
             ("DeviceKey", wintypes.WCHAR * 128),
         ]
 
+    class _POINTL(ctypes.Structure):
+        _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+    class _DEVMODEW(ctypes.Structure):
+        _fields_ = [
+            ("dmDeviceName", wintypes.WCHAR * 32),
+            ("dmSpecVersion", wintypes.WORD),
+            ("dmDriverVersion", wintypes.WORD),
+            ("dmSize", wintypes.WORD),
+            ("dmDriverExtra", wintypes.WORD),
+            ("dmFields", wintypes.DWORD),
+            ("dmPosition", _POINTL),
+            ("dmDisplayOrientation", wintypes.DWORD),
+            ("dmDisplayFixedOutput", wintypes.DWORD),
+            ("dmColor", ctypes.c_short),
+            ("dmDuplex", ctypes.c_short),
+            ("dmYResolution", ctypes.c_short),
+            ("dmTTOption", ctypes.c_short),
+            ("dmCollate", ctypes.c_short),
+            ("dmFormName", wintypes.WCHAR * 32),
+            ("dmLogPixels", wintypes.WORD),
+            ("dmBitsPerPel", wintypes.DWORD),
+            ("dmPelsWidth", wintypes.DWORD),
+            ("dmPelsHeight", wintypes.DWORD),
+            ("dmDisplayFlags", wintypes.DWORD),
+            ("dmDisplayFrequency", wintypes.DWORD),
+            ("dmICMMethod", wintypes.DWORD),
+            ("dmICMIntent", wintypes.DWORD),
+            ("dmMediaType", wintypes.DWORD),
+            ("dmDitherType", wintypes.DWORD),
+            ("dmReserved1", wintypes.DWORD),
+            ("dmReserved2", wintypes.DWORD),
+            ("dmPanningWidth", wintypes.DWORD),
+            ("dmPanningHeight", wintypes.DWORD),
+        ]
+
 
 def _display_adapters() -> list[dict]:
     """List Windows display adapters, including a detached VDD output."""
@@ -211,7 +247,7 @@ def virtual_display_names() -> set[str]:
     names: set[str] = set()
     for adapter in _display_adapters():
         identity = (adapter["id"] + " " + adapter["string"]).lower()
-        if "mttvdd" in identity or "virtual display driver" in identity:
+        if "mttvdd" in identity or "virtual display driver" in identity or "virtual display" in identity:
             names.add(adapter["name"])
     return names
 
@@ -257,28 +293,77 @@ class DisplayTopology:
 
     def _switch(self, option: str) -> bool:
         if os.name == "nt":
+            user32 = ctypes.windll.user32
             try:
-                user32 = ctypes.windll.user32
+                user32.OpenDesktopW.restype = wintypes.HANDLE
+                user32.OpenDesktopW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+                user32.SetThreadDesktop.restype = wintypes.BOOL
+                user32.SetThreadDesktop.argtypes = [wintypes.HANDLE]
+                user32.SetDisplayConfig.restype = wintypes.LONG
+                user32.SetDisplayConfig.argtypes = [
+                    wintypes.UINT, ctypes.c_void_p, wintypes.UINT, ctypes.c_void_p, wintypes.UINT
+                ]
                 hdesk = user32.OpenDesktopW("default", 0, False, 0x01FF)
                 if hdesk:
                     user32.SetThreadDesktop(hdesk)
-                SDC_APPLY = 0x00000080
-                SDC_TOPOLOGY_INTERNAL = 0x00000001
-                SDC_TOPOLOGY_EXTEND = 0x00000004
-                flag = SDC_TOPOLOGY_INTERNAL if option == "/internal" else (SDC_TOPOLOGY_EXTEND if option == "/extend" else None)
-                if flag is not None:
-                    res = user32.SetDisplayConfig(0, None, 0, None, SDC_APPLY | flag)
-                    if res == 0:
-                        return True
             except Exception:
                 pass
+
+            if option == "/internal":
+                # 1. Directly detach virtual displays via ChangeDisplaySettingsExW
+                try:
+                    dm = _DEVMODEW()
+                    dm.dmSize = ctypes.sizeof(_DEVMODEW)
+                    dm.dmFields = 0x00080000 | 0x00100000 | 0x00000020  # DM_PELSWIDTH | DM_PELSHEIGHT | DM_POSITION
+                    dm.dmPelsWidth = 0
+                    dm.dmPelsHeight = 0
+                    dm.dmPosition.x = 0
+                    dm.dmPosition.y = 0
+                    for name in virtual_display_names():
+                        user32.ChangeDisplaySettingsExW(name, ctypes.byref(dm), None, 0x00000001, None)
+                    user32.ChangeDisplaySettingsExW(None, None, None, 0, None)
+                except Exception:
+                    pass
+
+                # 2. Revert Windows display layout to single-screen (internal)
+                try:
+                    res = user32.SetDisplayConfig(0, None, 0, None, 0x00000080 | 0x00000001)
+                    try:
+                        HWND_BROADCAST = 0xFFFF
+                        WM_SETTINGCHANGE = 0x001A
+                        user32.SendMessageTimeoutW(HWND_BROADCAST, WM_SETTINGCHANGE, 0, "Display", 0x0002, 500, None)
+                    except Exception:
+                        pass
+                    if res == 0:
+                        return True
+                except Exception:
+                    pass
+            elif option == "/extend":
+                try:
+                    res = user32.SetDisplayConfig(0, None, 0, None, 0x00000080 | 0x00000004)
+                    try:
+                        HWND_BROADCAST = 0xFFFF
+                        WM_SETTINGCHANGE = 0x001A
+                        user32.SendMessageTimeoutW(HWND_BROADCAST, WM_SETTINGCHANGE, 0, "Display", 0x0002, 500, None)
+                    except Exception:
+                        pass
+                    if res == 0:
+                        return True
+                except Exception:
+                    pass
 
             executable = os.path.join(os.environ.get("WINDIR", r"C:\Windows"),
                                       "System32", "DisplaySwitch.exe")
             try:
-                subprocess.run([executable, option], check=False, timeout=12,
+                subprocess.run([executable, option], check=False, timeout=8,
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                creationflags=(0x08000000 if os.name == "nt" else 0))
+                try:
+                    HWND_BROADCAST = 0xFFFF
+                    WM_SETTINGCHANGE = 0x001A
+                    user32.SendMessageTimeoutW(HWND_BROADCAST, WM_SETTINGCHANGE, 0, "Display", 0x0002, 500, None)
+                except Exception:
+                    pass
                 return True
             except (OSError, subprocess.SubprocessError) as error:
                 print(f"Display: could not change the Windows display layout ({error}).",
@@ -320,13 +405,27 @@ class DisplayTopology:
         if not connected or not active:
             return True
         if other_active_secondaries():
-            print("Display: another external monitor is active; leaving the Windows layout unchanged.",
+            print("Display: another external monitor is active; detaching only the virtual monitor.",
                   file=sys.stderr)
-            return False
+            try:
+                user32 = ctypes.windll.user32
+                dm = _DEVMODEW()
+                dm.dmSize = ctypes.sizeof(_DEVMODEW)
+                dm.dmFields = 0x00080000 | 0x00100000 | 0x00000020
+                dm.dmPelsWidth = 0
+                dm.dmPelsHeight = 0
+                dm.dmPosition.x = 0
+                dm.dmPosition.y = 0
+                for name in virtual_display_names():
+                    user32.ChangeDisplaySettingsExW(name, ctypes.byref(dm), None, 0x00000001, None)
+                user32.ChangeDisplaySettingsExW(None, None, None, 0, None)
+            except Exception:
+                pass
+            return True
         print(f"Display: {reason}; returning the PC to single-screen mode.", flush=True)
         if not self._switch("/internal"):
             return False
-        if not self._wait_for(False, 8.0):
+        if not self._wait_for(False, 5.0):
             print("Display: the virtual monitor is still active.", file=sys.stderr)
             return False
         return True

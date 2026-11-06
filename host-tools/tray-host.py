@@ -154,8 +154,67 @@ class LargeQRWindow(tk.Toplevel):
 
 # Ensure all threads bind to the interactive 'Default' desktop (Windows)
 if os.name == "nt":
+    from ctypes import wintypes
     user32 = ctypes.windll.user32
     kernel32 = ctypes.windll.kernel32
+
+    try:
+        user32.OpenDesktopW.restype = wintypes.HANDLE
+        user32.OpenDesktopW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        user32.SetThreadDesktop.restype = wintypes.BOOL
+        user32.SetThreadDesktop.argtypes = [wintypes.HANDLE]
+        user32.SetDisplayConfig.restype = wintypes.LONG
+        user32.SetDisplayConfig.argtypes = [
+            wintypes.UINT, ctypes.c_void_p, wintypes.UINT, ctypes.c_void_p, wintypes.UINT
+        ]
+    except Exception:
+        pass
+
+    class _POINTL(ctypes.Structure):
+        _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+    class _DEVMODEW(ctypes.Structure):
+        _fields_ = [
+            ("dmDeviceName", wintypes.WCHAR * 32),
+            ("dmSpecVersion", wintypes.WORD),
+            ("dmDriverVersion", wintypes.WORD),
+            ("dmSize", wintypes.WORD),
+            ("dmDriverExtra", wintypes.WORD),
+            ("dmFields", wintypes.DWORD),
+            ("dmPosition", _POINTL),
+            ("dmDisplayOrientation", wintypes.DWORD),
+            ("dmDisplayFixedOutput", wintypes.DWORD),
+            ("dmColor", ctypes.c_short),
+            ("dmDuplex", ctypes.c_short),
+            ("dmYResolution", ctypes.c_short),
+            ("dmTTOption", ctypes.c_short),
+            ("dmCollate", ctypes.c_short),
+            ("dmFormName", wintypes.WCHAR * 32),
+            ("dmLogPixels", wintypes.WORD),
+            ("dmBitsPerPel", wintypes.DWORD),
+            ("dmPelsWidth", wintypes.DWORD),
+            ("dmPelsHeight", wintypes.DWORD),
+            ("dmDisplayFlags", wintypes.DWORD),
+            ("dmDisplayFrequency", wintypes.DWORD),
+            ("dmICMMethod", wintypes.DWORD),
+            ("dmICMIntent", wintypes.DWORD),
+            ("dmMediaType", wintypes.DWORD),
+            ("dmDitherType", wintypes.DWORD),
+            ("dmReserved1", wintypes.DWORD),
+            ("dmReserved2", wintypes.DWORD),
+            ("dmPanningWidth", wintypes.DWORD),
+            ("dmPanningHeight", wintypes.DWORD),
+        ]
+
+    class _DISPLAY_DEVICEW(ctypes.Structure):
+        _fields_ = [
+            ("cb", wintypes.DWORD),
+            ("DeviceName", wintypes.WCHAR * 32),
+            ("DeviceString", wintypes.WCHAR * 128),
+            ("StateFlags", wintypes.DWORD),
+            ("DeviceID", wintypes.WCHAR * 128),
+            ("DeviceKey", wintypes.WCHAR * 128),
+        ]
 
     def ensure_default_desktop():
         try:
@@ -369,29 +428,85 @@ def detect_lan_ip() -> str:
         s.close()
 
 
+def get_virtual_display_names() -> set[str]:
+    """Return device names (e.g. \\\\.\\DISPLAY5) for virtual display adapters."""
+    if os.name != "nt" or not user32:
+        return set()
+    names = set()
+    try:
+        user32.EnumDisplayDevicesW.argtypes = [
+            ctypes.c_wchar_p, ctypes.c_uint32,
+            ctypes.POINTER(_DISPLAY_DEVICEW), ctypes.c_uint32,
+        ]
+        user32.EnumDisplayDevicesW.restype = ctypes.c_int
+        index = 0
+        while True:
+            dev = _DISPLAY_DEVICEW()
+            dev.cb = ctypes.sizeof(dev)
+            if not user32.EnumDisplayDevicesW(None, index, ctypes.byref(dev), 0):
+                break
+            identity = (str(dev.DeviceID) + " " + str(dev.DeviceString)).lower()
+            if "mttvdd" in identity or "virtual display driver" in identity or "virtual display" in identity:
+                names.add(str(dev.DeviceName))
+            index += 1
+    except Exception:
+        pass
+    return names
+
+
 def set_display_internal() -> bool:
-    """Instantly switches Windows display configuration to single-screen (internal)."""
+    """Instantly switches Windows display configuration to single-screen (internal) and detaches virtual displays."""
     if os.name != "nt":
         return True
+    success = False
     try:
         if user32:
             ensure_default_desktop()
+
+            # 1. Directly detach virtual display adapters via ChangeDisplaySettingsExW
+            try:
+                v_names = get_virtual_display_names()
+                if v_names:
+                    dm = _DEVMODEW()
+                    dm.dmSize = ctypes.sizeof(_DEVMODEW)
+                    dm.dmFields = 0x00080000 | 0x00100000 | 0x00000020  # DM_PELSWIDTH | DM_PELSHEIGHT | DM_POSITION
+                    dm.dmPelsWidth = 0
+                    dm.dmPelsHeight = 0
+                    dm.dmPosition.x = 0
+                    dm.dmPosition.y = 0
+                    for name in v_names:
+                        user32.ChangeDisplaySettingsExW(name, ctypes.byref(dm), None, 0x00000001, None)  # CDS_UPDATEREGISTRY
+                    user32.ChangeDisplaySettingsExW(None, None, None, 0, None)
+            except Exception:
+                pass
+
+            # 2. Revert display topology to internal (single-screen)
             SDC_APPLY = 0x00000080
             SDC_TOPOLOGY_INTERNAL = 0x00000001
             res = user32.SetDisplayConfig(0, None, 0, None, SDC_APPLY | SDC_TOPOLOGY_INTERNAL)
             if res == 0:
-                return True
+                success = True
+
+            # 3. Notify Windows Shell, Taskbar & Action Center so 'Wired display' tile resets immediately
+            try:
+                HWND_BROADCAST = 0xFFFF
+                WM_SETTINGCHANGE = 0x001A
+                user32.SendMessageTimeoutW(HWND_BROADCAST, WM_SETTINGCHANGE, 0, "Display", 0x0002, 500, None)
+            except Exception:
+                pass
     except Exception:
         pass
 
+    # 4. Fallback: DisplaySwitch.exe /internal
     try:
         display_switch = os.path.join(
             os.environ.get("WINDIR", r"C:\Windows"), "System32", "DisplaySwitch.exe"
         )
         subprocess.run([display_switch, "/internal"], capture_output=True, creationflags=CREATE_NO_WINDOW)
-        return True
     except Exception:
-        return False
+        pass
+
+    return success
 
 
 def setup_process_job():
@@ -705,6 +820,8 @@ class ExtendServiceManager:
         # 4. Revert Windows display layout to single-screen (internal)
         if reset_display:
             set_display_internal()
+            time.sleep(0.15)
+            set_display_internal()
 
         with open(LOG_FILE, "a", encoding="utf-8") as log_out:
             log_out.write(f"--- All processes killed at {time.ctime()} ---\n")
@@ -899,7 +1016,7 @@ class ControlWindow(tk.Toplevel):
         lbl_tag.bind("<Button-1>", self._start_drag)
         lbl_tag.bind("<B1-Motion>", self._on_drag)
 
-        btn_min = tk.Label(
+        btn_close = tk.Label(
             header,
             text="✕",
             font=("Segoe UI", 11),
@@ -909,7 +1026,22 @@ class ControlWindow(tk.Toplevel):
             padx=4,
             pady=2,
         )
-        btn_min.pack(side="right")
+        btn_close.pack(side="right")
+        btn_close.bind("<Button-1>", lambda e: self._exit_app())
+        btn_close.bind("<Enter>", lambda e: btn_close.configure(fg="#EF4444"))
+        btn_close.bind("<Leave>", lambda e: btn_close.configure(fg="#9CA3AF"))
+
+        btn_min = tk.Label(
+            header,
+            text="—",
+            font=("Segoe UI", 10),
+            fg="#9CA3AF",
+            bg="#181822",
+            cursor="hand2",
+            padx=6,
+            pady=2,
+        )
+        btn_min.pack(side="right", padx=(0, 4))
         btn_min.bind("<Button-1>", lambda e: self.hide())
         btn_min.bind("<Enter>", lambda e: btn_min.configure(fg="#FFFFFF"))
         btn_min.bind("<Leave>", lambda e: btn_min.configure(fg="#9CA3AF"))
