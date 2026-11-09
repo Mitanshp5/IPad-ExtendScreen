@@ -30,6 +30,7 @@ static void PSReleaseBuffer(void *info, const void *data, size_t size) {
     (void)data;
     (void)size;
     PSBuffer *buf = (PSBuffer *)info;
+    if (!buf) return;
     if (buf->isDynamic) {
         if (buf->data) free(buf->data);
         free(buf);
@@ -109,12 +110,17 @@ static void PSReleaseBuffer(void *info, const void *data, size_t size) {
 
     struct jpeg_decompress_struct cinfo;
     PSErrorMgr jerr;
+    __block PSBuffer *activeBuf = NULL;
 
     cinfo.err = jpeg_std_error(&jerr.pub);
     jerr.pub.error_exit = PSErrorExit;
     jerr.pub.emit_message = PSEmitMessage;
 
     if (setjmp(jerr.jump)) {
+        if (activeBuf) {
+            PSReleaseBuffer(activeBuf, NULL, 0);
+            activeBuf = NULL;
+        }
         jpeg_destroy_decompress(&cinfo);
         return NULL;
     }
@@ -145,6 +151,7 @@ static void PSReleaseBuffer(void *info, const void *data, size_t size) {
         jpeg_destroy_decompress(&cinfo);
         return NULL;
     }
+    activeBuf = buf;
 
     uint8_t *base = (uint8_t *)buf->data;
     JSAMPROW rows[16];
@@ -161,9 +168,11 @@ static void PSReleaseBuffer(void *info, const void *data, size_t size) {
 
     CGDataProviderRef provider = CGDataProviderCreateWithData(buf, buf->data, needed, PSReleaseBuffer);
     if (!provider) {
-        buf->inUse = 0;
+        activeBuf = NULL;
+        PSReleaseBuffer(buf, NULL, 0);
         return NULL;
     }
+    activeBuf = NULL; // Provider now owns releasing buf via PSReleaseBuffer
 
     CGImageRef image = CGImageCreate(
         width, height, 8, 32, stride, _colorSpace,
@@ -172,9 +181,6 @@ static void PSReleaseBuffer(void *info, const void *data, size_t size) {
     );
     CGDataProviderRelease(provider);
 
-    if (!image) {
-        buf->inUse = 0;
-    }
     return image;
 }
 

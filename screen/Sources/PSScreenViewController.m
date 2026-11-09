@@ -408,11 +408,14 @@ static const CGFloat PSChromeHotZoneHeight = 140.0;
 - (CGImageRef)decodeJPEG:(NSData *)jpeg {
     if (!jpeg.length) return NULL;
 
-    // 1. Fast Apple ImageIO hardware decoder
-    CGImageSourceRef source = CGImageSourceCreateWithData((__bridge CFDataRef)jpeg,
-        (__bridge CFDictionaryRef)@{(__bridge id)kCGImageSourceShouldCache: @NO});
+    // 1. Fast Apple ImageIO hardware decoder with synchronous caching
+    NSDictionary *options = @{
+        (__bridge id)kCGImageSourceShouldCache: @YES,
+        (__bridge id)kCGImageSourceShouldCacheImmediately: @YES
+    };
+    CGImageSourceRef source = CGImageSourceCreateWithData((__bridge CFDataRef)jpeg, (__bridge CFDictionaryRef)options);
     if (source) {
-        CGImageRef image = CGImageSourceCreateImageAtIndex(source, 0, NULL);
+        CGImageRef image = CGImageSourceCreateImageAtIndex(source, 0, (__bridge CFDictionaryRef)options);
         CFRelease(source);
         if (image) return image;
     }
@@ -481,9 +484,9 @@ static const CGFloat PSChromeHotZoneHeight = 140.0;
             PSScreenViewController *controller = weakSelf;
             if (controller && controller.acceptFrames) {
                 [controller dispatchNextDecode];
-            } else {
-                @synchronized (weakSelf) {
-                    weakSelf.decoding = NO;
+            } else if (controller) {
+                @synchronized (controller) {
+                    controller.decoding = NO;
                 }
             }
         }

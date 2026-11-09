@@ -236,9 +236,7 @@ static BOOL ReadExact(int fd, void *buf, size_t length) {
 
             PSStreamFrameHandler handler = self.frameHandler;
             if (handler && !self.stopped) {
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    handler(frameData, (NSUInteger)seq);
-                });
+                handler(frameData, (NSUInteger)seq);
             }
         }
 
