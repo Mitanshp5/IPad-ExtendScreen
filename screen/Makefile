@@ -10,7 +10,7 @@ THEOS_PLATFORM_DEB_COMPRESSION_TYPE := gzip
 include $(THEOS)/makefiles/common.mk
 
 APPLICATION_NAME := ExtendScreen
-ExtendScreen_FILES := Sources/main.m Sources/AppDelegate.m Sources/PSScreenViewController.m Sources/PSSettingsViewController.m Sources/PSQRScannerViewController.m Sources/PSKeyboardViewController.m Sources/PSConnectionClient.m Sources/PSStreamClient.m Sources/PSInputClient.m Sources/PSKeychainStore.m Sources/PSScreenPolicy.c Sources/PSCableServer.m Sources/PSTurboDecoder.m
+ExtendScreen_FILES := Sources/main.m Sources/AppDelegate.m Sources/PSLogger.m Sources/PSScreenViewController.m Sources/PSSettingsViewController.m Sources/PSQRScannerViewController.m Sources/PSKeyboardViewController.m Sources/PSConnectionClient.m Sources/PSStreamClient.m Sources/PSInputClient.m Sources/PSKeychainStore.m Sources/PSScreenPolicy.c Sources/PSCableServer.m Sources/PSTurboDecoder.m
 ExtendScreen_FRAMEWORKS := UIKit Foundation CoreGraphics Security ImageIO QuartzCore AVFoundation CoreMedia
 ExtendScreen_CFLAGS := -fobjc-arc -Werror=unguarded-availability -Werror=implicit-function-declaration -Wno-deprecated-declarations -Ivendor/libjpeg-turbo/include
 ExtendScreen_LDFLAGS := -Lvendor/libjpeg-turbo/lib -ljpeg

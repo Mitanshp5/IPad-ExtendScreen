@@ -1,4 +1,5 @@
 #import "PSTurboDecoder.h"
+#import "PSLogger.h"
 #import <stdio.h>
 #import <stdlib.h>
 #import <setjmp.h>
@@ -18,6 +19,9 @@ typedef struct {
 
 static void PSErrorExit(j_common_ptr cinfo) {
     PSErrorMgr *err = (PSErrorMgr *)cinfo->err;
+    char buffer[JMSG_LENGTH_MAX];
+    (*cinfo->err->format_message)(cinfo, buffer);
+    PSLog(@"[PSTurboDecoder] libjpeg error: %s", buffer);
     longjmp(err->jump, 1);
 }
 
@@ -30,6 +34,7 @@ static void PSReleaseBuffer(void *info, const void *data, size_t size) {
     (void)data;
     (void)size;
     PSBuffer *buf = (PSBuffer *)info;
+    if (!buf) return;
     if (buf->isDynamic) {
         if (buf->data) free(buf->data);
         free(buf);
@@ -52,6 +57,7 @@ static void PSReleaseBuffer(void *info, const void *data, size_t size) {
         _pool = (PSBuffer *)calloc(_poolCount, sizeof(PSBuffer));
         _poolLock = [[NSLock alloc] init];
         _colorSpace = CGColorSpaceCreateDeviceRGB();
+        PSLog(@"[PSTurboDecoder] Initialized with poolCount=%lu", (unsigned long)_poolCount);
     }
     return self;
 }
@@ -60,13 +66,13 @@ static void PSReleaseBuffer(void *info, const void *data, size_t size) {
     for (NSUInteger i = 0; i < _poolCount; i++) {
         if (_pool[i].data) free(_pool[i].data);
     }
-    if (_pool) free(_pool);
+    free(_pool);
     if (_colorSpace) CGColorSpaceRelease(_colorSpace);
 }
 
 - (PSBuffer *)acquireBufferOfSize:(size_t)needed {
-    [_poolLock lock];
     PSBuffer *chosen = NULL;
+    [_poolLock lock];
     for (NSUInteger i = 0; i < _poolCount; i++) {
         if (_pool[i].inUse) continue;
         chosen = &_pool[i];
@@ -109,12 +115,17 @@ static void PSReleaseBuffer(void *info, const void *data, size_t size) {
 
     struct jpeg_decompress_struct cinfo;
     PSErrorMgr jerr;
+    __block PSBuffer *activeBuf = NULL;
 
     cinfo.err = jpeg_std_error(&jerr.pub);
     jerr.pub.error_exit = PSErrorExit;
     jerr.pub.emit_message = PSEmitMessage;
 
     if (setjmp(jerr.jump)) {
+        if (activeBuf) {
+            PSReleaseBuffer(activeBuf, NULL, 0);
+            activeBuf = NULL;
+        }
         jpeg_destroy_decompress(&cinfo);
         return NULL;
     }
@@ -123,6 +134,7 @@ static void PSReleaseBuffer(void *info, const void *data, size_t size) {
     jpeg_mem_src(&cinfo, (const unsigned char *)[jpeg bytes], (unsigned long)[jpeg length]);
 
     if (jpeg_read_header(&cinfo, TRUE) != JPEG_HEADER_OK) {
+        PSLog(@"[PSTurboDecoder] jpeg_read_header failed");
         jpeg_destroy_decompress(&cinfo);
         return NULL;
     }
@@ -141,10 +153,12 @@ static void PSReleaseBuffer(void *info, const void *data, size_t size) {
 
     PSBuffer *buf = [self acquireBufferOfSize:needed];
     if (!buf) {
+        PSLog(@"[PSTurboDecoder] Could not acquire buffer of size %zu", needed);
         jpeg_abort_decompress(&cinfo);
         jpeg_destroy_decompress(&cinfo);
         return NULL;
     }
+    activeBuf = buf;
 
     uint8_t *base = (uint8_t *)buf->data;
     JSAMPROW rows[16];
@@ -161,9 +175,12 @@ static void PSReleaseBuffer(void *info, const void *data, size_t size) {
 
     CGDataProviderRef provider = CGDataProviderCreateWithData(buf, buf->data, needed, PSReleaseBuffer);
     if (!provider) {
-        buf->inUse = 0;
+        PSLog(@"[PSTurboDecoder] CGDataProviderCreateWithData failed");
+        activeBuf = NULL;
+        PSReleaseBuffer(buf, NULL, 0);
         return NULL;
     }
+    activeBuf = NULL; // CGDataProvider now responsible for PSReleaseBuffer
 
     CGImageRef image = CGImageCreate(
         width, height, 8, 32, stride, _colorSpace,
@@ -172,9 +189,6 @@ static void PSReleaseBuffer(void *info, const void *data, size_t size) {
     );
     CGDataProviderRelease(provider);
 
-    if (!image) {
-        buf->inUse = 0;
-    }
     return image;
 }
 

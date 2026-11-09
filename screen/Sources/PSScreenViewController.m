@@ -1,4 +1,5 @@
 #import "PSScreenViewController.h"
+#import "PSLogger.h"
 #import "PSSettingsViewController.h"
 #import "PSKeyboardViewController.h"
 #import "PSQRScannerViewController.h"
@@ -264,6 +265,10 @@ static const CGFloat PSChromeHotZoneHeight = 140.0;
     NSString *signature = [NSString stringWithFormat:@"%ld|%@|%ld|%d|%lx",
         (long)mode, server ?: @"", (long)fps, inputEnabled,
         (unsigned long)token.hash];
+
+    PSLog(@"[activateIfNeeded] mode=%@ server=%@ fps=%ld input=%d tokenHash=%lx sig=%@",
+          mode == PSModeCable ? @"CABLE" : @"WIFI", server, (long)fps, inputEnabled, (unsigned long)token.hash, signature);
+
     if ((self.streaming || self.connecting) && [signature isEqualToString:self.lastSignature]) return;
     if (self.reconnectTimer && [signature isEqualToString:self.lastSignature]) return;
     [self stopEverything];
@@ -280,8 +285,10 @@ static const CGFloat PSChromeHotZoneHeight = 140.0;
         self.connecting = YES;
         self.cableServer.delegate = self;
         [self setStatus:@"Starting the USB cable listener..."];
+        PSLog(@"[activateIfNeeded] Starting USB cable listener on port %u...", (unsigned)PSCableListenPort);
         if (![self.cableServer startOnPort:PSCableListenPort]) {
             self.connecting = NO;
+            PSLog(@"[activateIfNeeded] Failed to start USB cable listener!");
             [self setStatus:@"Could not start the USB cable listener on 127.0.0.1."];
         }
         return;
@@ -290,6 +297,7 @@ static const CGFloat PSChromeHotZoneHeight = 140.0;
     self.cableMode = NO;
     self.qrButton.hidden = NO;
     if (!server.length || status != errSecSuccess || !token.length) {
+        PSLog(@"[activateIfNeeded] Needs pairing (server='%@', status=%d, tokenLen=%lu)", server, (int)status, (unsigned long)token.length);
         [self setStatus:@"Tap 📷 to scan the pairing QR code on your PC,\nor open Settings to pair manually."];
         return;
     }
@@ -298,7 +306,11 @@ static const CGFloat PSChromeHotZoneHeight = 140.0;
 }
 
 - (void)startStream {
-    if (!self.serverURL.length || !self.token.length) return;
+    if (!self.serverURL.length || !self.token.length) {
+        PSLog(@"[startStream] Missing serverURL or token; aborting");
+        return;
+    }
+    PSLog(@"[startStream] Initiating Wi-Fi stream to %@ (token len %lu, fps %lu)", self.serverURL, (unsigned long)self.token.length, (unsigned long)self.streamFPS);
     if (!self.stream) {
         self.stream = [PSStreamClient new];
         __weak PSScreenViewController *weakSelf = self;
@@ -327,6 +339,7 @@ static const CGFloat PSChromeHotZoneHeight = 140.0;
         });
         return;
     }
+    PSLog(@"[streamStatus] streaming=%d message='%@' httpStatus=%ld", streaming, message, (long)httpStatus);
     self.connecting = NO;
     if (streaming) {
         self.streaming = YES;
@@ -353,6 +366,7 @@ static const CGFloat PSChromeHotZoneHeight = 140.0;
         });
         return;
     }
+    PSLog(@"[cableServer:status:streaming:] status='%@' streaming=%d cableMode=%d", status, streaming, self.cableMode);
     if (!self.cableMode) return;
     self.connecting = YES;
     if (streaming) {
@@ -377,12 +391,14 @@ static const CGFloat PSChromeHotZoneHeight = 140.0;
     [self cancelReconnect];
     NSTimeInterval delay = MIN(8.0, 2.0 + (NSTimeInterval)self.reconnectAttempt);
     self.reconnectAttempt++;
+    PSLog(@"[scheduleReconnect] Attempt %lu scheduled in %.1fs", (unsigned long)self.reconnectAttempt, delay);
     self.reconnectTimer = [NSTimer scheduledTimerWithTimeInterval:delay target:self
         selector:@selector(reconnectFired:) userInfo:nil repeats:NO];
 }
 
 - (void)reconnectFired:(NSTimer *)timer {
     self.reconnectTimer = nil;
+    PSLog(@"[reconnectFired] Reconnect fired; viewVisible=%d, inWindow=%d", self.viewVisible, self.view.window != nil);
     if (self.viewVisible && self.view.window) [self startStream];
 }
 
@@ -392,6 +408,7 @@ static const CGFloat PSChromeHotZoneHeight = 140.0;
 }
 
 - (void)stopEverything {
+    PSLog(@"[stopEverything] Stopping all network, cable and stream sessions");
     self.acceptFrames = NO;
     self.streaming = NO;
     self.connecting = NO;
@@ -408,20 +425,25 @@ static const CGFloat PSChromeHotZoneHeight = 140.0;
 - (CGImageRef)decodeJPEG:(NSData *)jpeg {
     if (!jpeg.length) return NULL;
 
-    // 1. Fast Apple ImageIO hardware decoder
-    CGImageSourceRef source = CGImageSourceCreateWithData((__bridge CFDataRef)jpeg,
-        (__bridge CFDictionaryRef)@{(__bridge id)kCGImageSourceShouldCache: @NO});
+    // 1. Fast Apple ImageIO hardware decoder with immediate synchronous caching
+    NSDictionary *options = @{
+        (__bridge id)kCGImageSourceShouldCache: @YES,
+        (__bridge id)kCGImageSourceShouldCacheImmediately: @YES
+    };
+    CGImageSourceRef source = CGImageSourceCreateWithData((__bridge CFDataRef)jpeg, (__bridge CFDictionaryRef)options);
     if (source) {
-        CGImageRef image = CGImageSourceCreateImageAtIndex(source, 0, NULL);
+        CGImageRef image = CGImageSourceCreateImageAtIndex(source, 0, (__bridge CFDictionaryRef)options);
         CFRelease(source);
         if (image) return image;
     }
 
     // 2. High-performance NEON SIMD libjpeg-turbo fallback
     if (self.turboDecoder) {
-        return [self.turboDecoder decode:jpeg];
+        CGImageRef turboImage = [self.turboDecoder decode:jpeg];
+        if (turboImage) return turboImage;
     }
 
+    PSLog(@"[decodeJPEG] ERROR: Failed to decode frame (%lu bytes) with ImageIO and TurboDecoder", (unsigned long)jpeg.length);
     return NULL;
 }
 
@@ -481,9 +503,9 @@ static const CGFloat PSChromeHotZoneHeight = 140.0;
             PSScreenViewController *controller = weakSelf;
             if (controller && controller.acceptFrames) {
                 [controller dispatchNextDecode];
-            } else {
-                @synchronized (weakSelf) {
-                    weakSelf.decoding = NO;
+            } else if (controller) {
+                @synchronized (controller) {
+                    controller.decoding = NO;
                 }
             }
         }

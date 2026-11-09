@@ -1,5 +1,6 @@
 #import "AppDelegate.h"
 #import "PSScreenViewController.h"
+#import "PSLogger.h"
 
 @interface PSNavigationController : UINavigationController
 @end
@@ -16,6 +17,7 @@
     NSDictionary *bundled = [NSDictionary dictionaryWithContentsOfFile:
         [[NSBundle mainBundle] pathForResource:@"ScreenDefaults" ofType:@"plist"]];
     if (bundled) [[NSUserDefaults standardUserDefaults] registerDefaults:bundled];
+    PSLog(@"[AppDelegate] didFinishLaunchingWithOptions");
 
     self.window = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
     PSScreenViewController *screen = [PSScreenViewController new];

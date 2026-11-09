@@ -1,5 +1,6 @@
 #import "PSStreamClient.h"
 #import "PSScreenPolicy.h"
+#import "PSLogger.h"
 #import <sys/socket.h>
 #import <netinet/in.h>
 #import <netinet/tcp.h>
@@ -54,7 +55,10 @@ static const NSUInteger PSMaximumFrameBytes = 8 * 1024 * 1024;
     if (self.sockFD >= 0 && !self.stopped) {
         char buf[32];
         int len = snprintf(buf, sizeof(buf), "ACK %lu\n", (unsigned long)sequence);
-        send(self.sockFD, buf, (size_t)len, 0);
+        ssize_t sent = send(self.sockFD, buf, (size_t)len, 0);
+        if (sent < 0) {
+            PSLog(@"[PSStreamClient] sendACK:%lu failed (errno %d: %s)", (unsigned long)sequence, errno, strerror(errno));
+        }
     }
     [self.sendLock unlock];
 }
@@ -87,6 +91,7 @@ static BOOL ReadExact(int fd, void *buf, size_t length) {
 
 - (void)startWithServerURL:(NSString *)serverURL token:(NSString *)token fps:(NSUInteger)fps {
     if (!PSDeviceTokenIsSafe(token.UTF8String)) {
+        PSLog(@"[PSStreamClient] Rejected: device token unsafe or missing");
         [self report:NO message:@"Pair this iPad with the PC host first." status:0];
         return;
     }
@@ -106,6 +111,7 @@ static BOOL ReadExact(int fd, void *buf, size_t length) {
                            parts.path.UTF8String, userInfo, parts.query != nil, parts.fragment != nil);
     }
     if (!valid) {
+        PSLog(@"[PSStreamClient] Rejected: invalid server URL '%@'", serverURL);
         [self report:NO message:@"The saved host address is not a valid private LAN origin. Open Settings." status:0];
         return;
     }
@@ -118,6 +124,8 @@ static BOOL ReadExact(int fd, void *buf, size_t length) {
         [self stop];
         self.stopped = NO;
 
+        PSLog(@"[PSStreamClient] Resolving host %@:%u...", host, port);
+
         // Resolve host
         struct addrinfo hints, *res = NULL;
         memset(&hints, 0, sizeof(hints));
@@ -127,12 +135,14 @@ static BOOL ReadExact(int fd, void *buf, size_t length) {
         snprintf(portStr, sizeof(portStr), "%u", port);
 
         if (getaddrinfo(host.UTF8String, portStr, &hints, &res) != 0 || !res) {
+            PSLog(@"[PSStreamClient] Could not resolve host %@", host);
             [self report:NO message:@"Could not resolve PC host address." status:0];
             return;
         }
 
         int fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
         if (fd < 0) {
+            PSLog(@"[PSStreamClient] socket() failed (errno %d: %s)", errno, strerror(errno));
             freeaddrinfo(res);
             [self report:NO message:@"Could not create socket." status:0];
             return;
@@ -146,13 +156,16 @@ static BOOL ReadExact(int fd, void *buf, size_t length) {
         setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
         setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 
+        PSLog(@"[PSStreamClient] Connecting to %@:%u...", host, port);
         if (connect(fd, res->ai_addr, res->ai_addrlen) < 0) {
+            PSLog(@"[PSStreamClient] connect() failed (errno %d: %s)", errno, strerror(errno));
             close(fd);
             freeaddrinfo(res);
             [self report:NO message:@"Could not connect to PC host." status:0];
             return;
         }
         freeaddrinfo(res);
+        PSLog(@"[PSStreamClient] Connected! Sending GET /raw handshake...");
 
         [self.sendLock lock];
         self.sockFD = fd;
@@ -167,6 +180,7 @@ static BOOL ReadExact(int fd, void *buf, size_t length) {
                               "Connection: close\r\n\r\n",
                               host.UTF8String, port, tokenCopy.UTF8String);
         if (send(fd, req, (size_t)reqLen, 0) != reqLen) {
+            PSLog(@"[PSStreamClient] Handshake send failed (errno %d: %s)", errno, strerror(errno));
             close(fd);
             [self report:NO message:@"Failed to send stream handshake." status:0];
             return;
@@ -191,10 +205,13 @@ static BOOL ReadExact(int fd, void *buf, size_t length) {
         }
 
         if (!foundHeader) {
+            PSLog(@"[PSStreamClient] Handshake response timed out or incomplete (received %lu bytes)", (unsigned long)hLen);
             close(fd);
             [self report:NO message:@"Stream handshake response timed out." status:0];
             return;
         }
+
+        PSLog(@"[PSStreamClient] Handshake response:\n%s", headerBuf);
 
         if (!strstr(headerBuf, "200")) {
             close(fd);
@@ -202,6 +219,7 @@ static BOOL ReadExact(int fd, void *buf, size_t length) {
             if (strstr(headerBuf, "401")) status = 401;
             else if (strstr(headerBuf, "403")) status = 403;
             else if (strstr(headerBuf, "503")) status = 503;
+            PSLog(@"[PSStreamClient] Host rejected handshake with status %ld", (long)status);
             [self report:NO message:@"The host rejected the stream connection." status:status];
             return;
         }
@@ -209,36 +227,49 @@ static BOOL ReadExact(int fd, void *buf, size_t length) {
         // Read 16-byte binary header: EXTSCR01 (8 bytes) + width (4 bytes) + height (4 bytes)
         uint8_t magicBuf[16];
         if (!ReadExact(fd, magicBuf, 16) || memcmp(magicBuf, "EXTSCR01", 8) != 0) {
+            PSLog(@"[PSStreamClient] Invalid stream header: '%.8s'", magicBuf);
             close(fd);
             [self report:NO message:@"Invalid stream header from PC host." status:0];
             return;
         }
 
+        uint32_t w = 0, h = 0;
+        memcpy(&w, magicBuf + 8, 4);
+        memcpy(&h, magicBuf + 12, 4);
+        PSLog(@"[PSStreamClient] Stream magic verified: EXTSCR01, dimensions %ux%u", ntohl(w), ntohl(h));
+
         [self report:YES message:@"" status:200];
 
         // Frame receive loop
         // Each frame: [4 bytes sequence (uint32_be)][4 bytes length (uint32_be)][payload bytes]
+        NSUInteger frameCount = 0;
         while (!self.stopped) {
             uint32_t netSeq = 0, netLen = 0;
             if (!ReadExact(fd, &netSeq, 4) || !ReadExact(fd, &netLen, 4)) {
+                PSLog(@"[PSStreamClient] ReadExact failed reading frame header (errno %d: %s)", errno, strerror(errno));
                 break;
             }
             uint32_t seq = ntohl(netSeq);
             uint32_t len = ntohl(netLen);
             if (len == 0 || len > PSMaximumFrameBytes) {
+                PSLog(@"[PSStreamClient] Invalid frame length %u (max %lu)", len, (unsigned long)PSMaximumFrameBytes);
                 break;
             }
 
             NSMutableData *frameData = [NSMutableData dataWithLength:len];
             if (!ReadExact(fd, frameData.mutableBytes, len)) {
+                PSLog(@"[PSStreamClient] ReadExact failed reading frame payload %u bytes", len);
                 break;
+            }
+
+            frameCount++;
+            if (frameCount <= 5 || frameCount % 60 == 0) {
+                PSLog(@"[PSStreamClient] Frame #%lu received: seq=%u, len=%u bytes", (unsigned long)frameCount, seq, len);
             }
 
             PSStreamFrameHandler handler = self.frameHandler;
             if (handler && !self.stopped) {
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    handler(frameData, (NSUInteger)seq);
-                });
+                handler(frameData, (NSUInteger)seq);
             }
         }
 
@@ -247,6 +278,8 @@ static BOOL ReadExact(int fd, void *buf, size_t length) {
         self.sockFD = -1;
         BOOL stopped = self.stopped;
         [self.sendLock unlock];
+
+        PSLog(@"[PSStreamClient] Stream loop terminated (stopped=%d, totalFrames=%lu)", stopped, (unsigned long)frameCount);
 
         if (!stopped) {
             [self report:NO message:@"Screen stream disconnected. Reconnecting..." status:0];
