@@ -84,7 +84,6 @@ static UIImage *PSCursorImage(void) {
 @property (nonatomic) BOOL inputEnabled;
 @property (nonatomic) BOOL cableMode;
 @property (nonatomic) BOOL viewVisible;
-@property (nonatomic) BOOL suspendForSettings;
 @property (nonatomic) BOOL streaming;
 @property (nonatomic) BOOL connecting;
 @property (nonatomic) BOOL acceptFrames;
@@ -221,9 +220,9 @@ static const NSUInteger PSDecodeLanes = 1;
     };
 
     NSNotificationCenter *center = [NSNotificationCenter defaultCenter];
-    [center addObserver:self selector:@selector(appResignedActive) name:UIApplicationWillResignActiveNotification object:nil];
     [center addObserver:self selector:@selector(appBackgrounded) name:UIApplicationDidEnterBackgroundNotification object:nil];
     [center addObserver:self selector:@selector(appActivated) name:UIApplicationDidBecomeActiveNotification object:nil];
+    [center addObserver:self selector:@selector(appTerminating:) name:UIApplicationWillTerminateNotification object:nil];
 }
 
 - (void)viewWillAppear:(BOOL)animated {
@@ -234,7 +233,6 @@ static const NSUInteger PSDecodeLanes = 1;
 - (void)viewDidAppear:(BOOL)animated {
     [super viewDidAppear:animated];
     self.viewVisible = YES;
-    self.suspendForSettings = NO;
     [self startFPSTimer];
     [self showChrome];
     [self activateIfNeeded];
@@ -245,7 +243,6 @@ static const NSUInteger PSDecodeLanes = 1;
     [self.chromeTimer invalidate];
     self.chromeTimer = nil;
     self.viewVisible = NO;
-        if (self.suspendForSettings) [self stopEverything];
     [super viewWillDisappear:animated];
 }
 
@@ -300,6 +297,8 @@ static const NSUInteger PSDecodeLanes = 1;
 
 - (void)startFPSTimer {
     if (self.fpsTimer) return;
+    self.framesThisSecond = 0;
+    self.decodedThisSecond = 0;
     self.fpsTimer = [NSTimer scheduledTimerWithTimeInterval:1 target:self
         selector:@selector(fpsTick) userInfo:nil repeats:YES];
 }
@@ -791,8 +790,6 @@ static const NSUInteger PSDecodeLanes = 1;
 }
 
 - (void)openQRScannerDirect {
-    self.suspendForSettings = YES;
-    [self stopEverything];
     PSQRScannerViewController *scanner = [PSQRScannerViewController new];
     __weak PSScreenViewController *weakSelf = self;
     scanner.scanHandler = ^(NSString *serverURL, NSString *pairingCode) {
@@ -822,7 +819,6 @@ static const NSUInteger PSDecodeLanes = 1;
             [defaults setInteger:PSModeWiFi forKey:PSModeKey];
             [defaults synchronize];
             [controller setStatus:@"Paired! Connecting to desktop..."];
-            controller.suspendForSettings = NO;
             [controller activateIfNeeded];
         } else {
             [controller setStatus:message.length ? message : @"Pairing failed. Try scanning again."];
@@ -831,10 +827,14 @@ static const NSUInteger PSDecodeLanes = 1;
 }
 
 - (void)openSettings {
-    self.suspendForSettings = YES;
-    [self stopEverything];
+    PSSettingsViewController *settings = [PSSettingsViewController new];
+    __weak PSScreenViewController *weakSelf = self;
+    settings.wifiPairingForgotten = ^{
+        PSScreenViewController *controller = weakSelf;
+        if (controller && !controller.cableMode) [controller stopEverything];
+    };
     self.navigationController.navigationBarHidden = NO;
-    [self.navigationController pushViewController:[PSSettingsViewController new] animated:YES];
+    [self.navigationController pushViewController:settings animated:YES];
 }
 
 - (void)openKeyboard {
@@ -855,14 +855,12 @@ static const NSUInteger PSDecodeLanes = 1;
     [self presentViewController:navigation animated:YES completion:nil];
 }
 
-- (void)appResignedActive {
-    if (self.cableMode) return;
+- (void)appTerminating:(NSNotification *)notification {
     [self stopEverything];
 }
 
 - (void)appBackgrounded {
     self.viewVisible = NO;
-    [self stopEverything];
     [self stopFPSTimer];
 }
 

@@ -421,6 +421,7 @@
         if (!controller) return;
         [controller.connectionClient cancel];
         BOOL ok = [PSKeychainStore removeDeviceToken];
+        if (ok && controller.wifiPairingForgotten) controller.wifiPairingForgotten();
         controller.resultLabel.text = ok ? @"Wi-Fi pairing removed." : @"Wi-Fi credential removal failed.";
     }]];
     [self presentViewController:alert animated:YES completion:nil];
