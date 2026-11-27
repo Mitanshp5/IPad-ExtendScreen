@@ -11,6 +11,7 @@
 #import "PSTurboDecoder.h"
 #import <ImageIO/ImageIO.h>
 #import <QuartzCore/QuartzCore.h>
+#import <stdio.h>
 
 static const NSUInteger PSDefaultStreamWidth = 1024;
 static const NSUInteger PSDefaultStreamHeight = 768;
@@ -18,8 +19,50 @@ static const NSTimeInterval PSChromeIdleDelay = 4.5;
 static const CGFloat PSChromeHotZoneWidth = 120.0;
 static const CGFloat PSChromeHotZoneHeight = 140.0;
 
+// Temporary: mirrors the HUD to a file so the PC can read it over iFile
+// without asking anyone to squint at the iPad.
+static void PSLogStats(NSString *line) {
+    static BOOL started = NO;
+    FILE *file = fopen("/tmp/ExtendScreen.log", started ? "a" : "w");
+    started = YES;
+    if (!file) return;
+    fprintf(file, "%s\n", line.UTF8String);
+    fclose(file);
+}
+
+// The PC pointer is drawn locally so it tracks the finger instead of waiting
+// for the next JPEG to arrive, decode and upload.
+static UIImage *gCursorImage = nil;
+
+static UIImage *PSCursorImage(void) {
+    if (gCursorImage) return gCursorImage;
+    CGFloat width = 14.0, height = 22.0;
+    UIGraphicsBeginImageContextWithOptions(CGSizeMake(width, height), NO, 0);
+    UIBezierPath *arrow = [UIBezierPath bezierPath];
+    [arrow moveToPoint:CGPointMake(0, 0)];
+    [arrow addLineToPoint:CGPointMake(0, height - 3)];
+    [arrow addLineToPoint:CGPointMake(4.5, height - 7)];
+    [arrow addLineToPoint:CGPointMake(7.5, height)];
+    [arrow addLineToPoint:CGPointMake(10.5, height - 1.5)];
+    [arrow addLineToPoint:CGPointMake(7.5, height - 8)];
+    [arrow addLineToPoint:CGPointMake(12, height - 8)];
+    [arrow closePath];
+    arrow.lineWidth = 2.0;
+    arrow.lineJoinStyle = kCGLineJoinRound;
+    [[UIColor whiteColor] setFill];
+    [arrow fill];
+    [[UIColor blackColor] setStroke];
+    [arrow stroke];
+    gCursorImage = UIGraphicsGetImageFromCurrentImageContext();
+    UIGraphicsEndImageContext();
+    return gCursorImage;
+}
+
 @interface PSScreenViewController () <UIGestureRecognizerDelegate, PSCableServerDelegate>
 @property (nonatomic, strong) UIImageView *imageView;
+@property (nonatomic, strong) UIImageView *cursorView;
+@property (nonatomic) CGPoint cursorPoint;
+@property (nonatomic) BOOL cursorVisible;
 @property (nonatomic, strong) PSTurboDecoder *turboDecoder;
 @property (nonatomic) CGSize lastFrameSize;
 @property (nonatomic, strong) UILabel *statusLabel;
@@ -45,21 +88,39 @@ static const CGFloat PSChromeHotZoneHeight = 140.0;
 @property (nonatomic) BOOL streaming;
 @property (nonatomic) BOOL connecting;
 @property (nonatomic) BOOL acceptFrames;
-@property (nonatomic) BOOL decoding;
+@property (nonatomic) NSUInteger frameCounter;
+@property (nonatomic) NSUInteger lastRenderedSequence;
+@property (nonatomic) NSUInteger newestDecodedSequence;
 @property (nonatomic) BOOL dragging;
 @property (nonatomic, strong) NSData *pendingFrame;
 @property (nonatomic) NSUInteger pendingSequence;
 @property (nonatomic) NSUInteger reconnectAttempt;
 @property (nonatomic) NSUInteger framesThisSecond;
+@property (nonatomic) NSUInteger decodedThisSecond;
+@property (nonatomic) double decodeMs;
+@property (nonatomic) double renderMs;
 @property (nonatomic) NSTimeInterval lastMoveSent;
-@property (nonatomic) dispatch_queue_t decodeQueue;
+@property (nonatomic, strong) NSArray *decodeQueues;
 @end
 
-@implementation PSScreenViewController
+// The A5 has two cores, but decoding two frames at once made things slower:
+// both lanes and the CoreAnimation upload contend for the same memory bus.
+// One decode overlapping one upload is faster than two decodes.
+static const NSUInteger PSDecodeLanes = 1;
+
+@implementation PSScreenViewController {
+    BOOL _laneBusy[PSDecodeLanes];
+}
+
 - (instancetype)init {
     self = [super init];
     if (self) {
-        _decodeQueue = dispatch_queue_create("local.extendscreen.decode", DISPATCH_QUEUE_SERIAL);
+        NSMutableArray *queues = [NSMutableArray arrayWithCapacity:PSDecodeLanes];
+        for (NSUInteger lane = 0; lane < PSDecodeLanes; lane++) {
+            [queues addObject:dispatch_queue_create("local.extendscreen.decode",
+                DISPATCH_QUEUE_SERIAL)];
+        }
+        _decodeQueues = [queues copy];
     }
     return self;
 }
@@ -95,6 +156,11 @@ static const CGFloat PSChromeHotZoneHeight = 140.0;
     self.imageView.userInteractionEnabled = NO;
     self.imageView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     [self.view addSubview:self.imageView];
+
+    self.cursorView = [[UIImageView alloc] initWithImage:PSCursorImage()];
+    self.cursorView.userInteractionEnabled = NO;
+    self.cursorView.hidden = YES;
+    [self.view addSubview:self.cursorView];
 
     self.statusLabel = [UILabel new];
     self.statusLabel.textColor = [UIColor colorWithWhite:0.95 alpha:1];
@@ -193,7 +259,8 @@ static const CGFloat PSChromeHotZoneHeight = 140.0;
     self.settingsButton.frame = CGRectMake(width - button - margin, margin, button, button);
     self.qrButton.frame = CGRectMake(width - button - margin, margin + button + 10, button, button);
     self.keyboardButton.frame = CGRectMake(width - button - margin, margin + (button + 10) * 2, button, button);
-    self.fpsLabel.frame = CGRectMake(margin, height - 30, 92, 21);
+    self.fpsLabel.frame = CGRectMake(margin, height - 30, 240, 21);
+    [self positionCursor];
     if (!self.statusLabel.hidden) {
         CGFloat maxWidth = MIN(680, MAX(240, width - 120));
         CGSize fitted = [self.statusLabel sizeThatFits:CGSizeMake(maxWidth - 32, 420)];
@@ -244,9 +311,14 @@ static const CGFloat PSChromeHotZoneHeight = 140.0;
 }
 
 - (void)fpsTick {
-    if (self.fpsLabel.hidden) { self.framesThisSecond = 0; return; }
-    self.fpsLabel.text = [NSString stringWithFormat:@"%lu fps", (unsigned long)self.framesThisSecond];
+    // Temporary: dec = ms per JPEG decode (per lane), ren = ms on the main thread.
+    NSString *line = [NSString stringWithFormat:@"%lu fps  d%.1f r%.1f  %lu/%lu",
+        (unsigned long)self.framesThisSecond, self.decodeMs, self.renderMs,
+        (unsigned long)self.framesThisSecond, (unsigned long)self.decodedThisSecond];
+    if (!self.fpsLabel.hidden) self.fpsLabel.text = line;
+    PSLogStats(line);
     self.framesThisSecond = 0;
+    self.decodedThisSecond = 0;
 }
 
 - (void)activateIfNeeded {
@@ -396,8 +468,10 @@ static const CGFloat PSChromeHotZoneHeight = 140.0;
     self.streaming = NO;
     self.connecting = NO;
     self.cableMode = NO;
+    self.cursorVisible = NO;
+    self.cursorView.hidden = YES;
     self.pendingFrame = nil;
-    self.decoding = NO;
+    self.pendingSequence = 0;
     [self cancelReconnect];
     [self.stream stop];
     [self.input cancel];
@@ -408,19 +482,19 @@ static const CGFloat PSChromeHotZoneHeight = 140.0;
 - (CGImageRef)decodeJPEG:(NSData *)jpeg {
     if (!jpeg.length) return NULL;
 
-    // 1. Fast Apple ImageIO hardware decoder with synchronous caching
-    NSDictionary *options = @{
-        (__bridge id)kCGImageSourceShouldCache: @YES,
-        (__bridge id)kCGImageSourceShouldCacheImmediately: @YES
-    };
-    CGImageSourceRef source = CGImageSourceCreateWithData((__bridge CFDataRef)jpeg, (__bridge CFDictionaryRef)options);
+    // 1. Lazy ImageIO. With ShouldCache NO the pixels are never materialised here:
+    //    CoreAnimation decodes the JPEG straight into the texture during upload,
+    //    so the frame is touched once instead of decoded to a buffer and copied
+    //    again. Forcing the cache costs about 2x (that was the 22 fps build).
+    CGImageSourceRef source = CGImageSourceCreateWithData((__bridge CFDataRef)jpeg,
+        (__bridge CFDictionaryRef)@{(__bridge id)kCGImageSourceShouldCache: @NO});
     if (source) {
-        CGImageRef image = CGImageSourceCreateImageAtIndex(source, 0, (__bridge CFDictionaryRef)options);
+        CGImageRef image = CGImageSourceCreateImageAtIndex(source, 0, NULL);
         CFRelease(source);
         if (image) return image;
     }
 
-    // 2. High-performance NEON SIMD libjpeg-turbo fallback
+    // 2. NEON libjpeg-turbo for anything ImageIO rejects.
     if (self.turboDecoder) {
         return [self.turboDecoder decode:jpeg];
     }
@@ -433,64 +507,85 @@ static const CGFloat PSChromeHotZoneHeight = 140.0;
     @synchronized (self) {
         self.pendingFrame = jpeg;
         self.pendingSequence = sequence;
-        if (self.decoding) return;
-        self.decoding = YES;
     }
     [self dispatchNextDecode];
 }
 
 - (void)dispatchNextDecode {
-    NSData *frameToDecode = nil;
-    NSUInteger seqToDecode = 0;
-    @synchronized (self) {
-        if (!self.acceptFrames || !self.pendingFrame) {
-            self.decoding = NO;
-            return;
-        }
-        frameToDecode = self.pendingFrame;
-        seqToDecode = self.pendingSequence;
-        self.pendingFrame = nil;
-        self.pendingSequence = 0;
-    }
-
-    __weak PSScreenViewController *weakSelf = self;
-    dispatch_async(self.decodeQueue, ^{
-        @autoreleasepool {
-            CGImageRef cgImage = [weakSelf decodeJPEG:frameToDecode];
-            if (cgImage) {
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    PSScreenViewController *controller = weakSelf;
-                    if (!controller) {
-                        CGImageRelease(cgImage);
-                        return;
-                    }
-                    if (controller.acceptFrames) {
-                        controller.lastFrameSize = CGSizeMake((CGFloat)CGImageGetWidth(cgImage), (CGFloat)CGImageGetHeight(cgImage));
-                        [CATransaction begin];
-                        [CATransaction setDisableActions:YES];
-                        controller.imageView.layer.contents = (__bridge id)cgImage;
-                        [CATransaction commit];
-                        controller.framesThisSecond++;
-                        if (seqToDecode > 0) {
-                            [controller.stream sendACK:seqToDecode];
-                        }
-                    }
-                    CGImageRelease(cgImage);
-                });
-            }
-
-            // Concurrent pipeline: immediately start decoding the next frame on decodeQueue
-            // in parallel with UI rendering on the main thread!
-            PSScreenViewController *controller = weakSelf;
-            if (controller && controller.acceptFrames) {
-                [controller dispatchNextDecode];
-            } else if (controller) {
-                @synchronized (controller) {
-                    controller.decoding = NO;
+    for (;;) {
+        NSData *frameToDecode = nil;
+        NSUInteger ackSequence = 0;
+        NSUInteger orderID = 0;
+        NSUInteger lane = PSDecodeLanes;
+        @synchronized (self) {
+            if (!self.acceptFrames || !self.pendingFrame) return;
+            for (NSUInteger candidate = 0; candidate < PSDecodeLanes; candidate++) {
+                if (!_laneBusy[candidate]) {
+                    lane = candidate;
+                    break;
                 }
             }
+            if (lane == PSDecodeLanes) return;  // every lane is decoding
+            _laneBusy[lane] = YES;
+            frameToDecode = self.pendingFrame;
+            ackSequence = self.pendingSequence;
+            self.pendingFrame = nil;
+            self.pendingSequence = 0;
+            self.frameCounter++;
+            orderID = self.frameCounter;
         }
-    });
+
+        __weak PSScreenViewController *weakSelf = self;
+        dispatch_async((dispatch_queue_t)self.decodeQueues[lane], ^{
+            @autoreleasepool {
+                NSTimeInterval decodeStart = [NSDate timeIntervalSinceReferenceDate];
+                CGImageRef cgImage = [weakSelf decodeJPEG:frameToDecode];
+                double decodeMs = ([NSDate timeIntervalSinceReferenceDate] - decodeStart) * 1000.0;
+                if (cgImage) {
+                    PSScreenViewController *decoded = weakSelf;
+                    if (decoded) decoded.newestDecodedSequence = orderID;
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        PSScreenViewController *controller = weakSelf;
+                        if (!controller) {
+                            CGImageRelease(cgImage);
+                            return;
+                        }
+                        NSTimeInterval renderStart = [NSDate timeIntervalSinceReferenceDate];
+                        controller.decodedThisSecond++;
+                        // Two lanes can finish out of order; never show an older frame over a newer one.
+                        // Draw only the newest decoded frame. A queued backlog of
+                        // older frames is what makes the stream feel laggy.
+                        if (controller.acceptFrames && orderID > controller.lastRenderedSequence &&
+                            orderID >= controller.newestDecodedSequence) {
+                            controller.lastRenderedSequence = orderID;
+                            controller.lastFrameSize = CGSizeMake((CGFloat)CGImageGetWidth(cgImage), (CGFloat)CGImageGetHeight(cgImage));
+                            [CATransaction begin];
+                            [CATransaction setDisableActions:YES];
+                            controller.imageView.layer.contents = (__bridge id)cgImage;
+                            [CATransaction commit];
+                            controller.framesThisSecond++;
+                            if (ackSequence > 0) {
+                                [controller.stream sendACK:ackSequence];
+                            }
+                        }
+                        double renderMs = ([NSDate timeIntervalSinceReferenceDate] - renderStart) * 1000.0;
+                        controller.decodeMs = controller.decodeMs * 0.75 + decodeMs * 0.25;
+                        controller.renderMs = controller.renderMs * 0.75 + renderMs * 0.25;
+                        CGImageRelease(cgImage);
+                    });
+                }
+
+                // Free this lane and immediately pull the newest pending frame.
+                PSScreenViewController *controller = weakSelf;
+                if (controller) {
+                    @synchronized (controller) {
+                        controller->_laneBusy[lane] = NO;
+                    }
+                    [controller dispatchNextDecode];
+                }
+            }
+        });
+    }
 }
 
 - (CGSize)displayedImageSize {
@@ -501,6 +596,42 @@ static const CGFloat PSChromeHotZoneHeight = 140.0;
     if (size.width < 1 || size.height < 1)
         size = CGSizeMake((CGFloat)PSDefaultStreamWidth, (CGFloat)PSDefaultStreamHeight);
     return size;
+}
+
+- (void)positionCursor {
+    if (!self.cursorVisible) {
+        self.cursorView.hidden = YES;
+        return;
+    }
+    CGSize image = [self displayedImageSize];
+    CGRect bounds = self.imageView.bounds;
+    if (image.width < 1 || image.height < 1 || bounds.size.width < 1 || bounds.size.height < 1) {
+        self.cursorView.hidden = YES;
+        return;
+    }
+    CGFloat scale = MIN(bounds.size.width / image.width, bounds.size.height / image.height);
+    CGSize shown = CGSizeMake(image.width * scale, image.height * scale);
+    CGSize tip = self.cursorView.bounds.size;
+    self.cursorView.frame = CGRectMake(
+        (bounds.size.width - shown.width) / 2 + self.cursorPoint.x * shown.width,
+        (bounds.size.height - shown.height) / 2 + self.cursorPoint.y * shown.height,
+        tip.width, tip.height);
+    self.cursorView.hidden = NO;
+}
+
+- (void)updateCursor:(CGPoint)point visible:(BOOL)visible {
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{ [self updateCursor:point visible:visible]; });
+        return;
+    }
+    self.cursorPoint = point;
+    self.cursorVisible = visible;
+    [self positionCursor];
+}
+
+- (void)cableServer:(PSCableServer *)server cursor:(NSDictionary *)cursor {
+    [self updateCursor:CGPointMake([cursor[@"x"] doubleValue], [cursor[@"y"] doubleValue])
+               visible:[cursor[@"v"] boolValue]];
 }
 
 - (BOOL)normalizedPoint:(CGPoint)point clamp:(BOOL)clamp result:(CGPoint *)result {

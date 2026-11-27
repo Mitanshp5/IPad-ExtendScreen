@@ -852,7 +852,7 @@ class FFmpegFrameSource(FrameSource):
                 raise ValueError("ddagrab could not match the capture region to a display output")
             graph = (
                 f"ddagrab=output_idx={output_index}:framerate={self.fps}:"
-                f"video_size={region.width}x{region.height}:draw_mouse=1,"
+                f"video_size={region.width}x{region.height}:draw_mouse=0,"
                 f"hwdownload,format=bgra,{filters}"
             )
             return [*common, "-filter_complex", graph, *output]
@@ -878,7 +878,7 @@ class FFmpegFrameSource(FrameSource):
         return [
             *common,
             "-probesize", "32", "-analyzeduration", "0",
-            "-f", "gdigrab", "-framerate", str(self.fps), "-draw_mouse", "1",
+            "-f", "gdigrab", "-framerate", str(self.fps), "-draw_mouse", "0",
             "-offset_x", str(region.x), "-offset_y", str(region.y),
             "-video_size", f"{region.width}x{region.height}", "-i", "desktop",
             "-vf", filters, *output,
@@ -1551,6 +1551,40 @@ def _cable_input_reader(sock: socket.socket, backend: object, stop: threading.Ev
     stop.set()
 
 
+def _cable_cursor_loop(sock: socket.socket, send_lock: threading.Lock,
+                       region: Region, stop: threading.Event) -> None:
+    """Send the pointer as its own message so the iPad can move it without
+    waiting for a whole JPEG to arrive and decode.  The payload starts with a
+    zero byte, which a JPEG never does, so the app can tell the two apart on
+    the same socket."""
+    if os.name != "nt":
+        return  # shortcut: only Windows sends a separate cursor; X11 keeps draw_mouse=1
+
+    class POINT(ctypes.Structure):
+        _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+    user32 = ctypes.windll.user32
+    point = POINT()
+    last: Optional[bytes] = None
+    while not stop.is_set():
+        if not user32.GetCursorPos(ctypes.byref(point)):
+            time.sleep(0.1)
+            continue
+        nx = (point.x - region.x) / region.width
+        ny = (point.y - region.y) / region.height
+        visible = 0.0 <= nx <= 1.0 and 0.0 <= ny <= 1.0
+        payload = json.dumps({"x": round(nx, 4), "y": round(ny, 4), "v": visible},
+                             separators=(",", ":")).encode()
+        if payload != last:
+            last = payload
+            try:
+                with send_lock:
+                    sock.sendall(struct.pack(">I", len(payload) + 1) + b"\x00" + payload)
+            except OSError:
+                return
+        time.sleep(1 / 60)
+
+
 def run_cable(config: Config, args: argparse.Namespace,
               source_factory: Callable[[Config, Region, int], FrameSource] = make_ffmpeg_source,
               input_backend: Optional[object] = None) -> int:
@@ -1585,7 +1619,9 @@ def run_cable(config: Config, args: argparse.Namespace,
     sock: Optional[socket.socket] = None
     source: Optional[FrameSource] = None
     stop = threading.Event()
+    send_lock = threading.Lock()
     reader: Optional[threading.Thread] = None
+    cursor: Optional[threading.Thread] = None
     try:
         if args.cable_connect:
             host, _, port = args.cable_connect.rpartition(":")
@@ -1654,8 +1690,12 @@ def run_cable(config: Config, args: argparse.Namespace,
         reader = threading.Thread(target=_cable_input_reader, args=(sock, reader_backend, stop),
                                   name="extendscreen-cable-input", daemon=True)
         reader.start()
+        cursor = threading.Thread(target=_cable_cursor_loop, args=(sock, send_lock, region, stop),
+                                  name="extendscreen-cable-cursor", daemon=True)
+        cursor.start()
         last_sequence = sequence
-        sock.sendall(struct.pack(">I", len(first)) + first)
+        with send_lock:
+            sock.sendall(struct.pack(">I", len(first)) + first)
         while not stop.is_set():
             sequence, frame, error = source.wait_frame(last_sequence, 5.0)
             if frame is None:
@@ -1664,7 +1704,8 @@ def run_cable(config: Config, args: argparse.Namespace,
                     break
                 continue
             try:
-                sock.sendall(struct.pack(">I", len(frame)) + frame)
+                with send_lock:
+                    sock.sendall(struct.pack(">I", len(frame)) + frame)
             except OSError as send_err:
                 print(f"Cable stream stopped: connection closed: {send_err}", file=sys.stderr)
                 raise
@@ -1693,6 +1734,8 @@ def run_cable(config: Config, args: argparse.Namespace,
                 pass
         if reader is not None:
             reader.join(timeout=1)
+        if cursor is not None:
+            cursor.join(timeout=1)
         if topology.enabled:
             topology.disable("The cable stream ended")
     return 0

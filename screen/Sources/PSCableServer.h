@@ -5,6 +5,9 @@
 @protocol PSCableServerDelegate <NSObject>
 - (void)cableServer:(PSCableServer *)server status:(NSString *)status streaming:(BOOL)streaming;
 - (void)cableServer:(PSCableServer *)server frame:(NSData *)jpeg;
+@optional
+/* Pointer position, sent ahead of the frame it belongs to. */
+- (void)cableServer:(PSCableServer *)server cursor:(NSDictionary *)cursor;
 @end
 
 /* Loopback-only listener used by USB cable mode.  The PC connects through

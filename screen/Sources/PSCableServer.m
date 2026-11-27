@@ -176,12 +176,19 @@ static const NSUInteger PSCableMaximumFrame = 4 * 1024 * 1024;
             if (![self readAllFrom:fd buffer:&networkLength length:sizeof(networkLength)]) break;
             uint32_t length = ntohl(networkLength);
             if (length < 4 || length > PSCableMaximumFrame) break;
-            NSMutableData *jpeg = [NSMutableData dataWithLength:length];
-            if (!jpeg || ![self readAllFrom:fd buffer:jpeg.mutableBytes length:length]) break;
+            NSMutableData *payload = [NSMutableData dataWithLength:length];
+            if (!payload || ![self readAllFrom:fd buffer:payload.mutableBytes length:length]) break;
             @synchronized (self) {
                 if (!_running) break;
             }
-            [self reportFrame:jpeg];
+            // A leading zero marks a pointer update; a JPEG always starts with 0xFF.
+            if (((const unsigned char *)payload.bytes)[0] == 0x00) {
+                NSData *body = [payload subdataWithRange:NSMakeRange(1, length - 1)];
+                id decoded = [NSJSONSerialization JSONObjectWithData:body options:0 error:NULL];
+                if ([decoded isKindOfClass:[NSDictionary class]]) [self reportCursor:decoded];
+            } else {
+                [self reportFrame:payload];
+            }
         }
     }
 }
@@ -273,6 +280,14 @@ static const NSUInteger PSCableMaximumFrame = 4 * 1024 * 1024;
 - (void)reportFrame:(NSData *)frame {
     id<PSCableServerDelegate> delegate = self.delegate;
     if (delegate) [delegate cableServer:self frame:frame];
+}
+
+- (void)reportCursor:(NSDictionary *)cursor {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        id<PSCableServerDelegate> delegate = self.delegate;
+        if ([delegate respondsToSelector:@selector(cableServer:cursor:)])
+            [delegate cableServer:self cursor:cursor];
+    });
 }
 
 - (void)dealloc {
