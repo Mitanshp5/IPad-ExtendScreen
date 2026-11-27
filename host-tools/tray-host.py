@@ -252,51 +252,25 @@ TRAY_OFF_PNG = ROOT_DIR / "host-tools" / "tray_off.png"
 TRAY_ON_PNG = ROOT_DIR / "host-tools" / "tray_on.png"
 LOG_FILE = ROOT_DIR / "host-tools" / "tray.log"
 SETTINGS_FILE = ROOT_DIR / "host-tools" / "settings.json"
+TARGET_FPS = 60
 
 
-def load_tray_settings() -> dict:
-    defaults = {"mode": "cable", "fps": 60, "cable_fps": 60, "wifi_fps": 30}
-    if not SETTINGS_FILE.exists():
-        return defaults
+def load_tray_settings() -> dict[str, str]:
     try:
         with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
-            if isinstance(data, dict):
-                mode = data.get("mode", "cable")
-                if mode not in ("cable", "wifi"):
-                    mode = "cable"
-                cable_fps = int(data.get("cable_fps", 60))
-                cable_fps = max(5, min(60, cable_fps))
-                wifi_fps = 30
-                fps = int(data.get("fps", cable_fps if mode == "cable" else 30))
-                if mode == "wifi":
-                    fps = 30
-                else:
-                    fps = max(5, min(60, fps))
-                return {
-                    "mode": mode,
-                    "fps": fps,
-                    "cable_fps": cable_fps,
-                    "wifi_fps": wifi_fps,
-                }
-    except Exception:
+            if isinstance(data, dict) and data.get("mode") in ("cable", "wifi"):
+                return {"mode": data["mode"]}
+    except (OSError, ValueError):
         pass
-    return defaults
+    return {"mode": "cable"}
 
 
-def save_tray_settings(mode: str, fps: int, cable_fps: Optional[int] = None) -> None:
+def save_tray_settings(mode: str) -> None:
     try:
-        current = load_tray_settings()
-        current["mode"] = mode
-        current["fps"] = fps
-        if mode == "cable":
-            current["cable_fps"] = fps
-        elif cable_fps is not None:
-            current["cable_fps"] = cable_fps
-        current["wifi_fps"] = 30
         with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
-            json.dump(current, f, indent=2)
-    except Exception:
+            json.dump({"mode": mode}, f, indent=2)
+    except OSError:
         pass
 
 SPI_GETWORKAREA = 0x0030
@@ -593,7 +567,6 @@ class ExtendServiceManager:
         saved = load_tray_settings()
         self.proc: Optional[subprocess.Popen] = None
         self.mode = saved["mode"]
-        self.fps = saved["fps"]
         self.pair_code: Optional[str] = None
         self.url: Optional[str] = None
         self.on_status_change = on_status_change
@@ -622,16 +595,12 @@ class ExtendServiceManager:
             self.proc = None
         return False
 
-    def start(self, mode: Optional[str] = None, fps: Optional[int] = None) -> bool:
+    def start(self, mode: Optional[str] = None) -> bool:
         self.stop_requested = False
-        saved = load_tray_settings()
         if mode is None:
-            mode = saved["mode"]
-        if fps is None:
-            fps = saved["fps"]
+            mode = load_tray_settings()["mode"]
         self.mode = mode
-        self.fps = fps
-        save_tray_settings(mode, fps)
+        save_tray_settings(mode)
         self.pair_code = None
         self.url = None
 
@@ -642,15 +611,15 @@ class ExtendServiceManager:
         self.kill_all(reset_display=False)
 
         cmd = [sys.executable, "-u", str(HOST_SCRIPT), "--parent-pid", str(os.getpid())]
+        cmd.extend(["--extend", "--fps", str(TARGET_FPS)])
         if mode == "cable":
-            q = "6" if fps >= 60 else "5"
-            cmd.extend(["--cable", "--extend", "--fps", str(fps), "--quality", q])
+            cmd.extend(["--cable", "--quality", "6"])
         else:
-            cmd.extend(["--extend", "--fps", str(fps), "--quality", "7"])
+            cmd.extend(["--quality", "7"])
 
         try:
             with open(LOG_FILE, "a", encoding="utf-8") as log_out:
-                log_out.write(f"\n--- ExtendScreen Started ({mode} @ {fps} fps) at {time.ctime()} ---\n")
+                log_out.write(f"\n--- ExtendScreen Started ({mode}, target {TARGET_FPS} fps) at {time.ctime()} ---\n")
                 log_out.flush()
 
             self.proc = subprocess.Popen(
@@ -945,10 +914,7 @@ class ControlWindow(tk.Toplevel):
         self._drag_y = 0
 
         saved = load_tray_settings()
-        self.saved_cable_fps = saved.get("cable_fps", 60)
-        self.fps_var = tk.StringVar(value=str(saved["fps"]))
         self.mode_var = tk.StringVar(value=saved["mode"])
-        self.fps_buttons = {}
         self.mode_tiles = {}
         self.qr_photo: Optional[ImageTk.PhotoImage] = None
 
@@ -1015,21 +981,6 @@ class ControlWindow(tk.Toplevel):
         lbl_tag.pack(anchor="w")
         lbl_tag.bind("<Button-1>", self._start_drag)
         lbl_tag.bind("<B1-Motion>", self._on_drag)
-
-        btn_close = tk.Label(
-            header,
-            text="✕",
-            font=("Segoe UI", 11),
-            fg="#9CA3AF",
-            bg="#181822",
-            cursor="hand2",
-            padx=4,
-            pady=2,
-        )
-        btn_close.pack(side="right")
-        btn_close.bind("<Button-1>", lambda e: self._exit_app())
-        btn_close.bind("<Enter>", lambda e: btn_close.configure(fg="#EF4444"))
-        btn_close.bind("<Leave>", lambda e: btn_close.configure(fg="#9CA3AF"))
 
         btn_min = tk.Label(
             header,
@@ -1283,45 +1234,6 @@ class ControlWindow(tk.Toplevel):
         self.btn_copy_url.pack(side="left", padx=(2, 0))
         self.btn_copy_url.bind("<Button-1>", lambda e: self._copy_url())
 
-        # Framerate (FPS) Control Row
-        self.fps_box = tk.Frame(inner, bg="#1F1F2C", padx=12, pady=8, highlightthickness=1, highlightbackground="#2C2C3C")
-        self.fps_box.pack(fill="x", pady=(0, 10))
-
-        lbl_fps = tk.Label(self.fps_box, text="Framerate:", font=("Segoe UI", 8, "bold"), fg="#D1D5DB", bg="#1F1F2C")
-        lbl_fps.pack(side="left", padx=(0, 8))
-
-        self.fps_btn_container = tk.Frame(self.fps_box, bg="#282838", padx=2, pady=2, highlightthickness=1, highlightbackground="#3A3A4A")
-        self.fps_btn_container.pack(side="left")
-
-        self.fps_buttons = {}
-        for val in ["30", "45", "60"]:
-            b = tk.Label(self.fps_btn_container, text=f"{val}", font=("Segoe UI", 8, "bold"), width=3, padx=4, pady=2, cursor="hand2")
-            b.pack(side="left", padx=1)
-            b.bind("<Button-1>", lambda e, v=val: self._select_fps(v))
-            self.fps_buttons[val] = b
-
-        self.entry_fps = tk.Entry(
-            self.fps_box,
-            textvariable=self.fps_var,
-            font=("Segoe UI", 8, "bold"),
-            width=3,
-            bg="#282838",
-            fg="#38BDF8",
-            justify="center",
-            bd=0,
-            highlightthickness=1,
-            highlightbackground="#3A3A4A",
-            insertbackground="#38BDF8",
-        )
-        self.entry_fps.pack(side="left", padx=(8, 0))
-        self.entry_fps.bind("<Return>", lambda e: self._on_custom_fps())
-        self.entry_fps.bind("<FocusOut>", lambda e: self._on_custom_fps())
-
-        self.lbl_fps_unit = tk.Label(self.fps_box, text="FPS (5-60)", font=("Segoe UI", 7), fg="#6B7280", bg="#1F1F2C")
-        self.lbl_fps_unit.pack(side="left", padx=(4, 0))
-
-        self._update_fps_visibility()
-
         # Status / Guidance Box
         self.info_box = tk.Frame(inner, bg="#1F1F2C", padx=10, pady=8, highlightthickness=1, highlightbackground="#2A2A38")
         self.info_box.pack(fill="x", pady=(0, 12))
@@ -1389,94 +1301,13 @@ class ControlWindow(tk.Toplevel):
         y = self.winfo_y() + (event.y - self._drag_y)
         self.geometry(f"+{x}+{y}")
 
-    def get_fps(self) -> int:
-        try:
-            val = int(self.fps_var.get().strip())
-            if self.mode_var.get() == "wifi":
-                return 30
-            return max(5, min(60, val))
-        except Exception:
-            return 30 if self.mode_var.get() == "wifi" else self.saved_cable_fps
-
-    def _select_fps(self, val: str):
-        if self.mode_var.get() == "wifi" and val != "30":
-            return
-        self.fps_var.set(val)
-        if self.mode_var.get() == "cable":
-            try:
-                self.saved_cable_fps = int(val)
-            except Exception:
-                pass
-        self._update_fps_buttons()
-        save_tray_settings(self.mode_var.get(), self.get_fps(), cable_fps=self.saved_cable_fps)
-        if self.manager.is_running():
-            self._on_fps_changed()
-
-    def _on_custom_fps(self):
-        val = self.get_fps()
-        if self.mode_var.get() == "wifi":
-            val = 30
-        else:
-            self.saved_cable_fps = val
-        self.fps_var.set(str(val))
-        self._update_fps_buttons()
-        save_tray_settings(self.mode_var.get(), val, cable_fps=self.saved_cable_fps)
-        if self.manager.is_running():
-            self._on_fps_changed()
-
-    def _update_fps_buttons(self):
-        cur = self.fps_var.get().strip()
-        for val, btn in self.fps_buttons.items():
-            if cur == val:
-                btn.configure(bg="#0284C7", fg="#FFFFFF")
-            else:
-                btn.configure(bg="#282838", fg="#9CA3AF")
-
-    def _update_fps_visibility(self):
-        mode = self.mode_var.get()
-        if mode == "wifi":
-            self.fps_var.set("30")
-            for val in ["45", "60"]:
-                if val in self.fps_buttons:
-                    self.fps_buttons[val].pack_forget()
-            if "30" in self.fps_buttons:
-                self.fps_buttons["30"].pack(side="left", padx=1)
-            self.entry_fps.pack_forget()
-            self.lbl_fps_unit.configure(text="FPS (30Hz Wi-Fi limit)")
-        else:
-            for val in ["30", "45", "60"]:
-                if val in self.fps_buttons:
-                    self.fps_buttons[val].pack(side="left", padx=1)
-            self.entry_fps.pack(side="left", padx=(8, 0))
-            self.lbl_fps_unit.configure(text="FPS (5-60)")
-        self._update_fps_buttons()
-
-    def _on_fps_changed(self):
-        mode = self.mode_var.get()
-        fps = self.get_fps()
-        save_tray_settings(mode, fps, cable_fps=self.saved_cable_fps)
-        mode_name = "USB Cable" if mode == "cable" else "Wi-Fi"
-        self.lbl_status.configure(text="UPDATING...", fg="#38BDF8")
-        self.lbl_substatus.configure(text=f"Applying {fps} FPS to {mode_name}...", fg="#38BDF8")
-
-        def _bg():
-            self.manager.start(mode, fps=fps)
-            self.after(0, lambda: self._on_start_finished(True))
-
-        threading.Thread(target=_bg, daemon=True).start()
-
     def _select_mode(self, val: str):
         if self.mode_var.get() == val:
             return
         self.mode_var.set(val)
-        if val == "cable":
-            self.fps_var.set(str(self.saved_cable_fps))
-        else:
-            self.fps_var.set("30")
-        self._update_fps_visibility()
         self._update_mode_tiles()
         self._update_guidance()
-        save_tray_settings(self.mode_var.get(), self.get_fps(), cable_fps=self.saved_cable_fps)
+        save_tray_settings(val)
         if self.manager.is_running():
             self._on_mode_change()
 
@@ -1505,7 +1336,7 @@ class ControlWindow(tk.Toplevel):
                 canvas_radio.create_oval(2, 2, 16, 16, outline="#94A3B8", width=1.8, fill="#181822")
 
         if cur == "wifi":
-            self.pair_box.pack(fill="x", pady=(0, 10), before=self.fps_box)
+            self.pair_box.pack(fill="x", pady=(0, 10), before=self.footer)
             self.info_box.pack_forget()
             if self.manager.is_running() and self.manager.pair_code:
                 self._update_pairing_display(self.manager.pair_code, self.manager.url)
@@ -1517,7 +1348,6 @@ class ControlWindow(tk.Toplevel):
             self.pair_box.pack_forget()
             self.info_box.pack(fill="x", pady=(0, 12), before=self.footer)
 
-        self._update_fps_visibility()
         self._reanchor_window()
 
     def _open_large_qr(self):
@@ -1531,7 +1361,7 @@ class ControlWindow(tk.Toplevel):
         mode = self.mode_var.get()
         if mode == "cable":
             self.lbl_info1.configure(text="💡 USB Cable: Connect your iPad via Lightning/USB-C.")
-            self.lbl_info2.configure(text="   No pairing required. 60 FPS ultra-low latency.")
+            self.lbl_info2.configure(text="   No pairing required.")
         else:
             self.lbl_info1.configure(text="📶 Wi-Fi: Connect iPad to the same Wi-Fi network.")
             self.lbl_info2.configure(text="   Scan the QR code with iPad camera to pair instantly.")
@@ -1605,14 +1435,12 @@ class ControlWindow(tk.Toplevel):
 
     def _on_toggle(self, is_on: bool):
         mode = self.mode_var.get()
-        fps = self.get_fps()
-        save_tray_settings(mode, fps, cable_fps=self.saved_cable_fps)
         mode_name = "USB Cable" if mode == "cable" else "Wi-Fi"
 
         # 1. Update UI IMMEDIATELY so toggle knob and labels never lag
         if is_on:
             self.lbl_status.configure(text="STARTING...", fg="#38BDF8")
-            self.lbl_substatus.configure(text=f"Launching {mode_name} ({fps} FPS)...", fg="#38BDF8")
+            self.lbl_substatus.configure(text=f"Launching {mode_name}...", fg="#38BDF8")
             self.card.configure(highlightbackground="#0284C7", bg="#1A2234")
             self.card_left.configure(bg="#1A2234")
             self.lbl_serv.configure(bg="#1A2234")
@@ -1636,7 +1464,7 @@ class ControlWindow(tk.Toplevel):
         # 2. Heavy process operations run asynchronously in background thread
         def _bg_action():
             if is_on:
-                success = self.manager.start(mode, fps=fps)
+                success = self.manager.start(mode)
                 self.after(0, lambda: self._on_start_finished(success))
             else:
                 self.manager.kill_all(reset_display=True)
@@ -1647,9 +1475,8 @@ class ControlWindow(tk.Toplevel):
     def _on_start_finished(self, success: bool):
         if success:
             mode_name = "USB Cable" if self.mode_var.get() == "cable" else "Wi-Fi"
-            fps = self.get_fps()
             self.lbl_status.configure(text="ON", fg="#38BDF8")
-            self.lbl_substatus.configure(text=f"Active ({mode_name}) • {fps} FPS • Display extended", fg="#38BDF8")
+            self.lbl_substatus.configure(text=f"Active ({mode_name}) • Up to {TARGET_FPS} FPS", fg="#38BDF8")
             self.card.configure(highlightbackground="#0284C7", bg="#1A2234")
             if self.mode_var.get() == "wifi":
                 self._update_pairing_display(self.manager.pair_code, self.manager.url)
@@ -1666,26 +1493,24 @@ class ControlWindow(tk.Toplevel):
     def _on_mode_change(self):
         if self.manager.is_running():
             mode = self.mode_var.get()
-            fps = self.get_fps()
             mode_name = "USB Cable" if mode == "cable" else "Wi-Fi"
             self.lbl_status.configure(text="SWITCHING...", fg="#38BDF8")
-            self.lbl_substatus.configure(text=f"Switching to {mode_name} ({fps} FPS)...", fg="#38BDF8")
+            self.lbl_substatus.configure(text=f"Switching to {mode_name}...", fg="#38BDF8")
             if mode == "wifi":
                 self._update_pairing_display(None, None, starting=True)
 
             def _bg_restart():
-                self.manager.start(mode, fps=fps)
+                self.manager.start(mode)
                 self.after(0, lambda: self._on_start_finished(True))
 
             threading.Thread(target=_bg_restart, daemon=True).start()
 
     def update_state(self, is_running: bool):
         self.toggle.set_state(is_running)
-        fps = self.get_fps()
         if is_running:
             mode_name = "USB Cable" if self.mode_var.get() == "cable" else "Wi-Fi"
             self.lbl_status.configure(text="ON", fg="#38BDF8")
-            self.lbl_substatus.configure(text=f"Active ({mode_name}) • {fps} FPS • Display extended", fg="#38BDF8")
+            self.lbl_substatus.configure(text=f"Active ({mode_name}) • Up to {TARGET_FPS} FPS", fg="#38BDF8")
             self.card.configure(highlightbackground="#0284C7", bg="#1A2234")
             self.card_left.configure(bg="#1A2234")
             self.lbl_serv.configure(bg="#1A2234")
@@ -1880,9 +1705,8 @@ class ExtendScreenTrayApp:
 
     def _update_tray_state(self, is_running: bool):
         mode_name = "USB Cable" if self.control_win.mode_var.get() == "cable" else "Wi-Fi"
-        fps = self.control_win.get_fps()
         self.tray.icon = self.img_on if is_running else self.img_off
-        self.tray.title = f"ExtendScreen: {'ON (' + mode_name + ' @ ' + str(fps) + 'fps)' if is_running else 'OFF'}"
+        self.tray.title = f"ExtendScreen: ON ({mode_name}, up to {TARGET_FPS} FPS)" if is_running else "ExtendScreen: OFF"
         try:
             self.tray.update_menu()
         except Exception:
