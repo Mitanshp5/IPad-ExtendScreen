@@ -219,24 +219,42 @@ static BOOL ReadExact(int fd, void *buf, size_t length) {
         // Frame receive loop
         // Each frame: [4 bytes sequence (uint32_be)][4 bytes length (uint32_be)][payload bytes]
         while (!self.stopped) {
-            uint32_t netSeq = 0, netLen = 0;
-            if (!ReadExact(fd, &netSeq, 4) || !ReadExact(fd, &netLen, 4)) {
-                break;
-            }
-            uint32_t seq = ntohl(netSeq);
-            uint32_t len = ntohl(netLen);
-            if (len == 0 || len > PSMaximumFrameBytes) {
-                break;
-            }
+            @autoreleasepool {
+                uint32_t netSeq = 0, netLen = 0;
+                if (!ReadExact(fd, &netSeq, 4) || !ReadExact(fd, &netLen, 4)) {
+                    break;
+                }
+                uint32_t seq = ntohl(netSeq);
+                uint32_t len = ntohl(netLen);
+                if (len == 0 || len > PSMaximumFrameBytes) {
+                    break;
+                }
 
-            NSMutableData *frameData = [NSMutableData dataWithLength:len];
-            if (!ReadExact(fd, frameData.mutableBytes, len)) {
-                break;
-            }
+                NSMutableData *frameData = [NSMutableData dataWithLength:len];
+                if (!ReadExact(fd, frameData.mutableBytes, len)) {
+                    break;
+                }
 
-            PSStreamFrameHandler handler = self.frameHandler;
-            if (handler && !self.stopped) {
-                handler(frameData, (NSUInteger)seq);
+                // A leading zero marks a pointer update; JPEG starts with 0xFF.
+                const unsigned char *bytes = (const unsigned char *)frameData.bytes;
+                if (len > 1 && bytes[0] == 0x00) {
+                    NSData *body = [frameData subdataWithRange:NSMakeRange(1, len - 1)];
+                    id decoded = [NSJSONSerialization JSONObjectWithData:body options:0 error:NULL];
+                    if ([decoded isKindOfClass:[NSDictionary class]]) {
+                        PSStreamCursorHandler cursorHandler = self.cursorHandler;
+                        if (cursorHandler) {
+                            dispatch_async(dispatch_get_main_queue(), ^{
+                                cursorHandler(decoded);
+                            });
+                        }
+                    }
+                    continue;
+                }
+
+                PSStreamFrameHandler handler = self.frameHandler;
+                if (handler && !self.stopped) {
+                    handler(frameData, (NSUInteger)seq);
+                }
             }
         }
 

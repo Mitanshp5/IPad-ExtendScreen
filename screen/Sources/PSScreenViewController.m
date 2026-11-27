@@ -378,6 +378,11 @@ static const NSUInteger PSDecodeLanes = 1;
             PSScreenViewController *controller = weakSelf;
             if (controller) [controller receiveFrame:jpeg sequence:sequence];
         };
+        self.stream.cursorHandler = ^(NSDictionary *cursor) {
+            PSScreenViewController *controller = weakSelf;
+            if (controller) [controller updateCursor:CGPointMake([cursor[@"x"] doubleValue], [cursor[@"y"] doubleValue])
+                                               visible:[cursor[@"v"] boolValue]];
+        };
         self.stream.statusHandler = ^(BOOL streaming, NSString *message, NSInteger httpStatus) {
             PSScreenViewController *controller = weakSelf;
             if (!controller) return;

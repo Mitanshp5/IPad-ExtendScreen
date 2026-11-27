@@ -1552,7 +1552,8 @@ def _cable_input_reader(sock: socket.socket, backend: object, stop: threading.Ev
 
 
 def _cable_cursor_loop(sock: socket.socket, send_lock: threading.Lock,
-                       region: Region, stop: threading.Event) -> None:
+                       region: Region, stop: threading.Event,
+                       include_seq: bool = False) -> None:
     """Send the pointer as its own message so the iPad can move it without
     waiting for a whole JPEG to arrive and decode.  The payload starts with a
     zero byte, which a JPEG never does, so the app can tell the two apart on
@@ -1578,8 +1579,13 @@ def _cable_cursor_loop(sock: socket.socket, send_lock: threading.Lock,
         if payload != last:
             last = payload
             try:
+                pkt = b"\x00" + payload
+                if include_seq:
+                    wire = struct.pack(">II", 0, len(pkt)) + pkt
+                else:
+                    wire = struct.pack(">I", len(pkt)) + pkt
                 with send_lock:
-                    sock.sendall(struct.pack(">I", len(payload) + 1) + b"\x00" + payload)
+                    sock.sendall(wire)
             except OSError:
                 return
         time.sleep(1 / 60)
@@ -2232,6 +2238,7 @@ window.onload = function() {{
 
             acked_seq = [0]
             sock = self.connection
+            send_lock = threading.Lock()
 
             def _socket_reader():
                 buf = bytearray()
@@ -2267,11 +2274,17 @@ window.onload = function() {{
 
             reader_thread = threading.Thread(target=_socket_reader, daemon=True, name="extendscreen-raw-reader")
             reader_thread.start()
+            cursor_thread = threading.Thread(
+                target=_cable_cursor_loop,
+                args=(sock, send_lock, self.host.region, stop_event),
+                kwargs={"include_seq": True},
+                daemon=True, name="extendscreen-raw-cursor")
+            cursor_thread.start()
 
             # First frame
             pkt = struct.pack(">II", sequence, len(first)) + first
-            self.wfile.write(pkt)
-            self.wfile.flush()
+            with send_lock:
+                sock.sendall(pkt)
             last_sent_sequence = sequence
             last_send_time = time.monotonic()
             self.host.store.touch(token)
@@ -2291,8 +2304,8 @@ window.onload = function() {{
                     continue
 
                 pkt = struct.pack(">II", sequence, len(frame)) + frame
-                self.wfile.write(pkt)
-                self.wfile.flush()
+                with send_lock:
+                    sock.sendall(pkt)
                 last_sent_sequence = sequence
                 last_send_time = time.monotonic()
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
